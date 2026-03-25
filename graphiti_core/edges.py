@@ -78,6 +78,42 @@ class Edge(BaseModel, ABC):
                 """,
                 uuid=self.uuid,
             )
+        elif driver.provider == GraphProvider.ORACLE:
+            await driver.execute_query(
+                """
+                DELETE FROM GRAPHITI_RELATES_TO_EDGES
+                WHERE UUID = $uuid
+                """,
+                uuid=self.uuid,
+            )
+            await driver.execute_query(
+                """
+                DELETE FROM GRAPHITI_MENTIONS_EDGES
+                WHERE UUID = $uuid
+                """,
+                uuid=self.uuid,
+            )
+            await driver.execute_query(
+                """
+                DELETE FROM GRAPHITI_HAS_MEMBER_EDGES
+                WHERE UUID = $uuid
+                """,
+                uuid=self.uuid,
+            )
+            await driver.execute_query(
+                """
+                DELETE FROM GRAPHITI_HAS_EPISODE_EDGES
+                WHERE UUID = $uuid
+                """,
+                uuid=self.uuid,
+            )
+            await driver.execute_query(
+                """
+                DELETE FROM GRAPHITI_NEXT_EPISODE_EDGES
+                WHERE UUID = $uuid
+                """,
+                uuid=self.uuid,
+            )
         else:
             await driver.execute_query(
                 """
@@ -116,6 +152,43 @@ class Edge(BaseModel, ABC):
                 """,
                 uuids=uuids,
             )
+        elif driver.provider == GraphProvider.ORACLE:
+            for edge_uuid in uuids:
+                await driver.execute_query(
+                    """
+                    DELETE FROM GRAPHITI_RELATES_TO_EDGES
+                    WHERE UUID = $uuid
+                    """,
+                    uuid=edge_uuid,
+                )
+                await driver.execute_query(
+                    """
+                    DELETE FROM GRAPHITI_MENTIONS_EDGES
+                    WHERE UUID = $uuid
+                    """,
+                    uuid=edge_uuid,
+                )
+                await driver.execute_query(
+                    """
+                    DELETE FROM GRAPHITI_HAS_MEMBER_EDGES
+                    WHERE UUID = $uuid
+                    """,
+                    uuid=edge_uuid,
+                )
+                await driver.execute_query(
+                    """
+                    DELETE FROM GRAPHITI_HAS_EPISODE_EDGES
+                    WHERE UUID = $uuid
+                    """,
+                    uuid=edge_uuid,
+                )
+                await driver.execute_query(
+                    """
+                    DELETE FROM GRAPHITI_NEXT_EPISODE_EDGES
+                    WHERE UUID = $uuid
+                    """,
+                    uuid=edge_uuid,
+                )
         else:
             await driver.execute_query(
                 """

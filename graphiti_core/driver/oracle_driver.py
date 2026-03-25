@@ -72,10 +72,153 @@ QueryTransform = Callable[[str, dict[str, Any]], tuple[str, dict[str, Any]]]
 
 _DOLLAR_BIND_PATTERN = re.compile(r'\$([A-Za-z_][A-Za-z0-9_]*)')
 
+_ORACLE_SCHEMA_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS GRAPHITI_ENTITY_NODES (
+        UUID VARCHAR2(255) PRIMARY KEY,
+        NAME VARCHAR2(4000),
+        GROUP_ID VARCHAR2(1024),
+        LABELS_JSON CLOB,
+        CREATED_AT TIMESTAMP WITH TIME ZONE,
+        SUMMARY CLOB,
+        NAME_EMBEDDING_JSON CLOB,
+        ATTRIBUTES_JSON CLOB
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS GRAPHITI_EPISODIC_NODES (
+        UUID VARCHAR2(255) PRIMARY KEY,
+        NAME VARCHAR2(4000),
+        GROUP_ID VARCHAR2(1024),
+        SOURCE_DESCRIPTION CLOB,
+        CONTENT CLOB,
+        ENTITY_EDGES_JSON CLOB,
+        CREATED_AT TIMESTAMP WITH TIME ZONE,
+        VALID_AT TIMESTAMP WITH TIME ZONE,
+        SOURCE VARCHAR2(128)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS GRAPHITI_COMMUNITY_NODES (
+        UUID VARCHAR2(255) PRIMARY KEY,
+        NAME VARCHAR2(4000),
+        GROUP_ID VARCHAR2(1024),
+        SUMMARY CLOB,
+        CREATED_AT TIMESTAMP WITH TIME ZONE,
+        NAME_EMBEDDING_JSON CLOB
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS GRAPHITI_SAGA_NODES (
+        UUID VARCHAR2(255) PRIMARY KEY,
+        NAME VARCHAR2(4000),
+        GROUP_ID VARCHAR2(1024),
+        CREATED_AT TIMESTAMP WITH TIME ZONE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS GRAPHITI_RELATES_TO_EDGES (
+        UUID VARCHAR2(255) PRIMARY KEY,
+        GROUP_ID VARCHAR2(1024),
+        SOURCE_NODE_UUID VARCHAR2(255),
+        TARGET_NODE_UUID VARCHAR2(255),
+        NAME VARCHAR2(4000),
+        FACT CLOB,
+        FACT_EMBEDDING_JSON CLOB,
+        EPISODES_JSON CLOB,
+        CREATED_AT TIMESTAMP WITH TIME ZONE,
+        EXPIRED_AT TIMESTAMP WITH TIME ZONE,
+        VALID_AT TIMESTAMP WITH TIME ZONE,
+        INVALID_AT TIMESTAMP WITH TIME ZONE,
+        ATTRIBUTES_JSON CLOB
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS GRAPHITI_MENTIONS_EDGES (
+        UUID VARCHAR2(255) PRIMARY KEY,
+        GROUP_ID VARCHAR2(1024),
+        SOURCE_NODE_UUID VARCHAR2(255),
+        TARGET_NODE_UUID VARCHAR2(255),
+        CREATED_AT TIMESTAMP WITH TIME ZONE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS GRAPHITI_HAS_MEMBER_EDGES (
+        UUID VARCHAR2(255) PRIMARY KEY,
+        GROUP_ID VARCHAR2(1024),
+        SOURCE_NODE_UUID VARCHAR2(255),
+        TARGET_NODE_UUID VARCHAR2(255),
+        CREATED_AT TIMESTAMP WITH TIME ZONE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS GRAPHITI_HAS_EPISODE_EDGES (
+        UUID VARCHAR2(255) PRIMARY KEY,
+        GROUP_ID VARCHAR2(1024),
+        SOURCE_NODE_UUID VARCHAR2(255),
+        TARGET_NODE_UUID VARCHAR2(255),
+        CREATED_AT TIMESTAMP WITH TIME ZONE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS GRAPHITI_NEXT_EPISODE_EDGES (
+        UUID VARCHAR2(255) PRIMARY KEY,
+        GROUP_ID VARCHAR2(1024),
+        SOURCE_NODE_UUID VARCHAR2(255),
+        TARGET_NODE_UUID VARCHAR2(255),
+        CREATED_AT TIMESTAMP WITH TIME ZONE
+    )
+    """,
+    'CREATE INDEX GRAPHITI_ENTITY_GROUP_IDX ON GRAPHITI_ENTITY_NODES (GROUP_ID)',
+    'CREATE INDEX GRAPHITI_EPISODIC_GROUP_IDX ON GRAPHITI_EPISODIC_NODES (GROUP_ID)',
+    'CREATE INDEX GRAPHITI_COMMUNITY_GROUP_IDX ON GRAPHITI_COMMUNITY_NODES (GROUP_ID)',
+    'CREATE INDEX GRAPHITI_SAGA_GROUP_IDX ON GRAPHITI_SAGA_NODES (GROUP_ID)',
+    'CREATE INDEX GRAPHITI_RELATES_GROUP_IDX ON GRAPHITI_RELATES_TO_EDGES (GROUP_ID)',
+    'CREATE INDEX GRAPHITI_RELATES_SRC_IDX ON GRAPHITI_RELATES_TO_EDGES (SOURCE_NODE_UUID)',
+    'CREATE INDEX GRAPHITI_RELATES_TGT_IDX ON GRAPHITI_RELATES_TO_EDGES (TARGET_NODE_UUID)',
+    'CREATE INDEX GRAPHITI_MENTIONS_GROUP_IDX ON GRAPHITI_MENTIONS_EDGES (GROUP_ID)',
+    'CREATE INDEX GRAPHITI_MEMBER_GROUP_IDX ON GRAPHITI_HAS_MEMBER_EDGES (GROUP_ID)',
+    'CREATE INDEX GRAPHITI_HAS_EP_GROUP_IDX ON GRAPHITI_HAS_EPISODE_EDGES (GROUP_ID)',
+    'CREATE INDEX GRAPHITI_NEXT_EP_GROUP_IDX ON GRAPHITI_NEXT_EPISODE_EDGES (GROUP_ID)',
+]
+
 
 def _convert_dollar_binds_to_colon(query: str) -> str:
     """Translate `$param` bind placeholders into Oracle-style `:param` placeholders."""
     return _DOLLAR_BIND_PATTERN.sub(r':\1', query)
+
+
+def _is_ignorable_ddl_error(exc: Exception) -> bool:
+    text = str(exc)
+    return 'ORA-00955' in text or 'name is already used by an existing object' in text
+
+
+async def _oracle_object_exists(cursor: Any, object_type: str, object_name: str) -> bool:
+    if object_type == 'table':
+        await cursor.execute(
+            'SELECT 1 FROM USER_TABLES WHERE TABLE_NAME = :name',
+            {'name': object_name},
+        )
+    else:
+        await cursor.execute(
+            'SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME = :name',
+            {'name': object_name},
+        )
+    rows = await cursor.fetchall()
+    return len(rows) > 0
+
+
+def _looks_like_cypher(query: str) -> bool:
+    normalized = query.upper()
+    cypher_markers = [
+        'MATCH (',
+        'OPTIONAL MATCH',
+        'MERGE (',
+        'DETACH DELETE',
+        'CALL DB.',
+        'UNWIND ',
+    ]
+    return any(marker in normalized for marker in cypher_markers)
 
 
 def _parse_oracle_uri(uri: str) -> tuple[str, str | None, str | None]:
@@ -189,6 +332,8 @@ class OracleDriver(GraphDriver):
         self._password = configured_password
         self.pool: Any = None
         self._connection_lock = asyncio.Lock()
+        self._schema_lock = asyncio.Lock()
+        self._schema_initialized = False
 
         if self._query_runner is None:
             if self._dsn is None or self._user is None or self._password is None:
@@ -268,6 +413,27 @@ class OracleDriver(GraphDriver):
         """Backward-compatible alias for the native Oracle pool."""
         return self.pool
 
+    async def _ensure_native_schema(self, pool: Any) -> None:
+        if self._query_runner is not None or self._query_transform is not None:
+            return
+        if self._schema_initialized:
+            return
+
+        async with self._schema_lock:
+            if self._schema_initialized:
+                return
+            async with pool.acquire() as connection:
+                connection.autocommit = True
+                with connection.cursor() as cursor:
+                    for statement in _ORACLE_SCHEMA_STATEMENTS:
+                        try:
+                            await cursor.execute(statement)
+                        except Exception as exc:
+                            if _is_ignorable_ddl_error(exc):
+                                continue
+                            raise
+            self._schema_initialized = True
+
     @client.setter
     def client(self, value: Any) -> None:
         self.pool = value
@@ -293,6 +459,13 @@ class OracleDriver(GraphDriver):
                 return result
 
             return result, None, None
+
+        if self._query_transform is None and _looks_like_cypher(cypher_query_):
+            raise ValueError(
+                'Oracle native mode executes SQL statements against Graphiti tables. '
+                'Received a Cypher-style query. Provide query_transform/query_runner to translate '
+                'Cypher, or call Oracle graph operations that use SQL.'
+            )
 
         return await self._execute_oracledb_query(cypher_query_, params)
 
@@ -356,6 +529,7 @@ class OracleDriver(GraphDriver):
 
     async def _execute_oracledb_query(self, query: str, params: dict[str, Any]):
         pool = await self._ensure_pool()
+        await self._ensure_native_schema(pool)
         oracle_query, oracle_params = self._prepare_oracle_query(query, params)
 
         try:

@@ -57,6 +57,11 @@ def get_episode_node_save_query(provider: GraphProvider) -> str:
                 entity_edges: $entity_edges, created_at: $created_at, valid_at: $valid_at}
                 RETURN n.uuid AS uuid
             """
+        case GraphProvider.ORACLE:
+            raise ValueError(
+                'Oracle native mode does not use Cypher episode query templates. '
+                'Use Oracle episode operations in graphiti_core.driver.oracle.operations.'
+            )
         case _:  # Neo4j
             return """
                 MERGE (n:Episodic {uuid: $uuid})
@@ -99,6 +104,11 @@ def get_episode_node_save_bulk_query(provider: GraphProvider) -> str:
                 entity_edges: episode.entity_edges, created_at: episode.created_at, valid_at: episode.valid_at}
                 RETURN n.uuid AS uuid
             """
+        case GraphProvider.ORACLE:
+            raise ValueError(
+                'Oracle native mode does not use Cypher episode bulk query templates. '
+                'Use Oracle episode operations in graphiti_core.driver.oracle.operations.'
+            )
         case _:  # Neo4j
             return """
                 UNWIND $episodes AS episode

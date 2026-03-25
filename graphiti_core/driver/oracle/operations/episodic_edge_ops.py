@@ -17,17 +17,12 @@ limitations under the License.
 import logging
 from typing import Any
 
-from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.operations.episodic_edge_ops import EpisodicEdgeOperations
+from graphiti_core.driver.oracle.sql_utils import build_in_clause
 from graphiti_core.driver.query_executor import QueryExecutor, Transaction
 from graphiti_core.edges import EpisodicEdge
 from graphiti_core.errors import EdgeNotFoundError
 from graphiti_core.helpers import parse_db_date
-from graphiti_core.models.edges.edge_db_queries import (
-    EPISODIC_EDGE_RETURN,
-    EPISODIC_EDGE_SAVE,
-    get_episodic_edge_save_bulk_query,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +44,27 @@ class OracleEpisodicEdgeOperations(EpisodicEdgeOperations):
         edge: EpisodicEdge,
         tx: Transaction | None = None,
     ) -> None:
+        delete_query = 'DELETE FROM GRAPHITI_MENTIONS_EDGES WHERE UUID = $uuid'
+        insert_query = """
+            INSERT INTO GRAPHITI_MENTIONS_EDGES (
+                UUID, GROUP_ID, SOURCE_NODE_UUID, TARGET_NODE_UUID, CREATED_AT
+            ) VALUES (
+                $uuid, $group_id, $source_node_uuid, $target_node_uuid, $created_at
+            )
+        """
         params: dict[str, Any] = {
-            'episode_uuid': edge.source_node_uuid,
-            'entity_uuid': edge.target_node_uuid,
             'uuid': edge.uuid,
             'group_id': edge.group_id,
+            'source_node_uuid': edge.source_node_uuid,
+            'target_node_uuid': edge.target_node_uuid,
             'created_at': edge.created_at,
         }
         if tx is not None:
-            await tx.run(EPISODIC_EDGE_SAVE, **params)
+            await tx.run(delete_query, uuid=edge.uuid)
+            await tx.run(insert_query, **params)
         else:
-            await executor.execute_query(EPISODIC_EDGE_SAVE, **params)
+            await executor.execute_query(delete_query, uuid=edge.uuid)
+            await executor.execute_query(insert_query, **params)
 
         logger.debug(f'Saved Edge to Graph: {edge.uuid}')
 
@@ -70,12 +75,8 @@ class OracleEpisodicEdgeOperations(EpisodicEdgeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        query = get_episodic_edge_save_bulk_query(GraphProvider.ORACLE)
-        edge_dicts = [e.model_dump() for e in edges]
-        if tx is not None:
-            await tx.run(query, episodic_edges=edge_dicts)
-        else:
-            await executor.execute_query(query, episodic_edges=edge_dicts)
+        for edge in edges:
+            await self.save(executor, edge, tx=tx)
 
     async def delete(
         self,
@@ -83,10 +84,7 @@ class OracleEpisodicEdgeOperations(EpisodicEdgeOperations):
         edge: EpisodicEdge,
         tx: Transaction | None = None,
     ) -> None:
-        query = """
-            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER {uuid: $uuid}]->(m)
-            DELETE e
-        """
+        query = 'DELETE FROM GRAPHITI_MENTIONS_EDGES WHERE UUID = $uuid'
         if tx is not None:
             await tx.run(query, uuid=edge.uuid)
         else:
@@ -100,29 +98,29 @@ class OracleEpisodicEdgeOperations(EpisodicEdgeOperations):
         uuids: list[str],
         tx: Transaction | None = None,
     ) -> None:
-        query = """
-            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]->(m)
-            WHERE e.uuid IN $uuids
-            DELETE e
-        """
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f'DELETE FROM GRAPHITI_MENTIONS_EDGES WHERE {clause}'
         if tx is not None:
-            await tx.run(query, uuids=uuids)
+            await tx.run(query, **params)
         else:
-            await executor.execute_query(query, uuids=uuids)
+            await executor.execute_query(query, **params)
 
     async def get_by_uuid(
         self,
         executor: QueryExecutor,
         uuid: str,
     ) -> EpisodicEdge:
-        query = (
-            """
-            MATCH (n:Episodic)-[e:MENTIONS {uuid: $uuid}]->(m:Entity)
-            RETURN
-            """
-            + EPISODIC_EDGE_RETURN
-        )
-        records, _, _ = await executor.execute_query(query, uuid=uuid, routing_='r')
+        query = """
+            SELECT
+                UUID AS uuid,
+                GROUP_ID AS group_id,
+                SOURCE_NODE_UUID AS source_node_uuid,
+                TARGET_NODE_UUID AS target_node_uuid,
+                CREATED_AT AS created_at
+            FROM GRAPHITI_MENTIONS_EDGES
+            WHERE UUID = $uuid
+        """
+        records, _, _ = await executor.execute_query(query, uuid=uuid)
         edges = [_episodic_edge_from_record(r) for r in records]
         if len(edges) == 0:
             raise EdgeNotFoundError(uuid)
@@ -133,15 +131,18 @@ class OracleEpisodicEdgeOperations(EpisodicEdgeOperations):
         executor: QueryExecutor,
         uuids: list[str],
     ) -> list[EpisodicEdge]:
-        query = (
-            """
-            MATCH (n:Episodic)-[e:MENTIONS]->(m:Entity)
-            WHERE e.uuid IN $uuids
-            RETURN
-            """
-            + EPISODIC_EDGE_RETURN
-        )
-        records, _, _ = await executor.execute_query(query, uuids=uuids, routing_='r')
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                GROUP_ID AS group_id,
+                SOURCE_NODE_UUID AS source_node_uuid,
+                TARGET_NODE_UUID AS target_node_uuid,
+                CREATED_AT AS created_at
+            FROM GRAPHITI_MENTIONS_EDGES
+            WHERE {clause}
+        """
+        records, _, _ = await executor.execute_query(query, **params)
         return [_episodic_edge_from_record(r) for r in records]
 
     async def get_by_group_ids(
@@ -151,28 +152,23 @@ class OracleEpisodicEdgeOperations(EpisodicEdgeOperations):
         limit: int | None = None,
         uuid_cursor: str | None = None,
     ) -> list[EpisodicEdge]:
-        cursor_clause = 'AND e.uuid < $uuid' if uuid_cursor else ''
-        limit_clause = 'LIMIT $limit' if limit is not None else ''
-        query = (
-            """
-            MATCH (n:Episodic)-[e:MENTIONS]->(m:Entity)
-            WHERE e.group_id IN $group_ids
-            """
-            + cursor_clause
-            + """
-            RETURN
-            """
-            + EPISODIC_EDGE_RETURN
-            + """
-            ORDER BY e.uuid DESC
-            """
-            + limit_clause
-        )
-        records, _, _ = await executor.execute_query(
-            query,
-            group_ids=group_ids,
-            uuid=uuid_cursor,
-            limit=limit,
-            routing_='r',
-        )
+        where_clause, where_params = build_in_clause('GROUP_ID', 'group_id', group_ids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                GROUP_ID AS group_id,
+                SOURCE_NODE_UUID AS source_node_uuid,
+                TARGET_NODE_UUID AS target_node_uuid,
+                CREATED_AT AS created_at
+            FROM GRAPHITI_MENTIONS_EDGES
+            WHERE {where_clause}
+        """
+        params = dict(where_params)
+        if uuid_cursor is not None:
+            query += ' AND UUID < $uuid'
+            params['uuid'] = uuid_cursor
+        query += ' ORDER BY UUID DESC'
+        records, _, _ = await executor.execute_query(query, **params)
+        if limit is not None:
+            records = records[:limit]
         return [_episodic_edge_from_record(r) for r in records]

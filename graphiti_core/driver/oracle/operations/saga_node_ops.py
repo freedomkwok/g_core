@@ -17,12 +17,11 @@ limitations under the License.
 import logging
 from typing import Any
 
-from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.operations.saga_node_ops import SagaNodeOperations
+from graphiti_core.driver.oracle.sql_utils import build_in_clause
 from graphiti_core.driver.query_executor import QueryExecutor, Transaction
 from graphiti_core.errors import NodeNotFoundError
 from graphiti_core.helpers import parse_db_date
-from graphiti_core.models.nodes.node_db_queries import SAGA_NODE_RETURN, get_saga_node_save_query
 from graphiti_core.nodes import SagaNode
 
 logger = logging.getLogger(__name__)
@@ -44,7 +43,14 @@ class OracleSagaNodeOperations(SagaNodeOperations):
         node: SagaNode,
         tx: Transaction | None = None,
     ) -> None:
-        query = get_saga_node_save_query(GraphProvider.ORACLE)
+        delete_query = 'DELETE FROM GRAPHITI_SAGA_NODES WHERE UUID = $uuid'
+        insert_query = """
+            INSERT INTO GRAPHITI_SAGA_NODES (
+                UUID, NAME, GROUP_ID, CREATED_AT
+            ) VALUES (
+                $uuid, $name, $group_id, $created_at
+            )
+        """
         params: dict[str, Any] = {
             'uuid': node.uuid,
             'name': node.name,
@@ -52,9 +58,11 @@ class OracleSagaNodeOperations(SagaNodeOperations):
             'created_at': node.created_at,
         }
         if tx is not None:
-            await tx.run(query, **params)
+            await tx.run(delete_query, uuid=node.uuid)
+            await tx.run(insert_query, **params)
         else:
-            await executor.execute_query(query, **params)
+            await executor.execute_query(delete_query, uuid=node.uuid)
+            await executor.execute_query(insert_query, **params)
 
         logger.debug(f'Saved Saga Node to Graph: {node.uuid}')
 
@@ -74,10 +82,7 @@ class OracleSagaNodeOperations(SagaNodeOperations):
         node: SagaNode,
         tx: Transaction | None = None,
     ) -> None:
-        query = """
-            MATCH (n:Saga {uuid: $uuid})
-            DETACH DELETE n
-        """
+        query = 'DELETE FROM GRAPHITI_SAGA_NODES WHERE UUID = $uuid'
         if tx is not None:
             await tx.run(query, uuid=node.uuid)
         else:
@@ -92,14 +97,11 @@ class OracleSagaNodeOperations(SagaNodeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        query = """
-            MATCH (n:Saga {group_id: $group_id})
-            DETACH DELETE n
-        """
+        query = 'DELETE FROM GRAPHITI_SAGA_NODES WHERE GROUP_ID = $group_id'
         if tx is not None:
-            await tx.run(query, group_id=group_id, batch_size=batch_size)
+            await tx.run(query, group_id=group_id)
         else:
-            await executor.execute_query(query, group_id=group_id, batch_size=batch_size)
+            await executor.execute_query(query, group_id=group_id)
 
     async def delete_by_uuids(
         self,
@@ -108,29 +110,28 @@ class OracleSagaNodeOperations(SagaNodeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        query = """
-            MATCH (n:Saga)
-            WHERE n.uuid IN $uuids
-            DETACH DELETE n
-        """
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f'DELETE FROM GRAPHITI_SAGA_NODES WHERE {clause}'
         if tx is not None:
-            await tx.run(query, uuids=uuids, batch_size=batch_size)
+            await tx.run(query, **params)
         else:
-            await executor.execute_query(query, uuids=uuids, batch_size=batch_size)
+            await executor.execute_query(query, **params)
 
     async def get_by_uuid(
         self,
         executor: QueryExecutor,
         uuid: str,
     ) -> SagaNode:
-        query = (
-            """
-            MATCH (s:Saga {uuid: $uuid})
-            RETURN
-            """
-            + SAGA_NODE_RETURN
-        )
-        records, _, _ = await executor.execute_query(query, uuid=uuid, routing_='r')
+        query = """
+            SELECT
+                UUID AS uuid,
+                NAME AS name,
+                GROUP_ID AS group_id,
+                CREATED_AT AS created_at
+            FROM GRAPHITI_SAGA_NODES
+            WHERE UUID = $uuid
+        """
+        records, _, _ = await executor.execute_query(query, uuid=uuid)
         nodes = [_saga_node_from_record(r) for r in records]
         if len(nodes) == 0:
             raise NodeNotFoundError(uuid)
@@ -141,15 +142,17 @@ class OracleSagaNodeOperations(SagaNodeOperations):
         executor: QueryExecutor,
         uuids: list[str],
     ) -> list[SagaNode]:
-        query = (
-            """
-            MATCH (s:Saga)
-            WHERE s.uuid IN $uuids
-            RETURN
-            """
-            + SAGA_NODE_RETURN
-        )
-        records, _, _ = await executor.execute_query(query, uuids=uuids, routing_='r')
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                NAME AS name,
+                GROUP_ID AS group_id,
+                CREATED_AT AS created_at
+            FROM GRAPHITI_SAGA_NODES
+            WHERE {clause}
+        """
+        records, _, _ = await executor.execute_query(query, **params)
         return [_saga_node_from_record(r) for r in records]
 
     async def get_by_group_ids(
@@ -159,28 +162,22 @@ class OracleSagaNodeOperations(SagaNodeOperations):
         limit: int | None = None,
         uuid_cursor: str | None = None,
     ) -> list[SagaNode]:
-        cursor_clause = 'AND s.uuid < $uuid' if uuid_cursor else ''
-        limit_clause = 'LIMIT $limit' if limit is not None else ''
-        query = (
-            """
-            MATCH (s:Saga)
-            WHERE s.group_id IN $group_ids
-            """
-            + cursor_clause
-            + """
-            RETURN
-            """
-            + SAGA_NODE_RETURN
-            + """
-            ORDER BY s.uuid DESC
-            """
-            + limit_clause
-        )
-        records, _, _ = await executor.execute_query(
-            query,
-            group_ids=group_ids,
-            uuid=uuid_cursor,
-            limit=limit,
-            routing_='r',
-        )
+        where_clause, where_params = build_in_clause('GROUP_ID', 'group_id', group_ids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                NAME AS name,
+                GROUP_ID AS group_id,
+                CREATED_AT AS created_at
+            FROM GRAPHITI_SAGA_NODES
+            WHERE {where_clause}
+        """
+        params = dict(where_params)
+        if uuid_cursor is not None:
+            query += ' AND UUID < $uuid'
+            params['uuid'] = uuid_cursor
+        query += ' ORDER BY UUID DESC'
+        records, _, _ = await executor.execute_query(query, **params)
+        if limit is not None:
+            records = records[:limit]
         return [_saga_node_from_record(r) for r in records]

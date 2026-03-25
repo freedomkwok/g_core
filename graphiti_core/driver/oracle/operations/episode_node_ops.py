@@ -18,19 +18,20 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.operations.episode_node_ops import EpisodeNodeOperations
+from graphiti_core.driver.oracle.sql_utils import build_in_clause, dumps_json, loads_json
 from graphiti_core.driver.query_executor import QueryExecutor, Transaction
 from graphiti_core.driver.record_parsers import episodic_node_from_record
 from graphiti_core.errors import NodeNotFoundError
-from graphiti_core.models.nodes.node_db_queries import (
-    EPISODIC_NODE_RETURN,
-    get_episode_node_save_bulk_query,
-    get_episode_node_save_query,
-)
 from graphiti_core.nodes import EpisodicNode
 
 logger = logging.getLogger(__name__)
+
+
+def _episodic_node_from_sql_record(record: dict[str, Any]) -> EpisodicNode:
+    prepared = dict(record)
+    prepared['entity_edges'] = loads_json(prepared.get('entity_edges_json'), [])
+    return episodic_node_from_record(prepared)
 
 
 class OracleEpisodeNodeOperations(EpisodeNodeOperations):
@@ -40,22 +41,33 @@ class OracleEpisodeNodeOperations(EpisodeNodeOperations):
         node: EpisodicNode,
         tx: Transaction | None = None,
     ) -> None:
-        query = get_episode_node_save_query(GraphProvider.ORACLE)
+        delete_query = 'DELETE FROM GRAPHITI_EPISODIC_NODES WHERE UUID = $uuid'
+        insert_query = """
+            INSERT INTO GRAPHITI_EPISODIC_NODES (
+                UUID, NAME, GROUP_ID, SOURCE_DESCRIPTION, CONTENT, ENTITY_EDGES_JSON,
+                CREATED_AT, VALID_AT, SOURCE
+            ) VALUES (
+                $uuid, $name, $group_id, $source_description, $content, $entity_edges_json,
+                $created_at, $valid_at, $source
+            )
+        """
         params: dict[str, Any] = {
             'uuid': node.uuid,
             'name': node.name,
             'group_id': node.group_id,
             'source_description': node.source_description,
             'content': node.content,
-            'entity_edges': node.entity_edges,
+            'entity_edges_json': dumps_json(node.entity_edges),
             'created_at': node.created_at,
             'valid_at': node.valid_at,
             'source': node.source.value,
         }
         if tx is not None:
-            await tx.run(query, **params)
+            await tx.run(delete_query, uuid=node.uuid)
+            await tx.run(insert_query, **params)
         else:
-            await executor.execute_query(query, **params)
+            await executor.execute_query(delete_query, uuid=node.uuid)
+            await executor.execute_query(insert_query, **params)
 
         logger.debug(f'Saved Episode to Graph: {node.uuid}')
 
@@ -66,18 +78,8 @@ class OracleEpisodeNodeOperations(EpisodeNodeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        episodes = []
         for node in nodes:
-            ep = dict(node)
-            ep['source'] = str(ep['source'].value)
-            ep.pop('labels', None)
-            episodes.append(ep)
-
-        query = get_episode_node_save_bulk_query(GraphProvider.ORACLE)
-        if tx is not None:
-            await tx.run(query, episodes=episodes)
-        else:
-            await executor.execute_query(query, episodes=episodes)
+            await self.save(executor, node, tx=tx)
 
     async def delete(
         self,
@@ -85,14 +87,7 @@ class OracleEpisodeNodeOperations(EpisodeNodeOperations):
         node: EpisodicNode,
         tx: Transaction | None = None,
     ) -> None:
-        query = """
-            MATCH (n {uuid: $uuid})
-            WHERE n:Entity OR n:Episodic OR n:Community
-            OPTIONAL MATCH (n)-[r]-()
-            WITH collect(r.uuid) AS edge_uuids, n
-            DETACH DELETE n
-            RETURN edge_uuids
-        """
+        query = 'DELETE FROM GRAPHITI_EPISODIC_NODES WHERE UUID = $uuid'
         if tx is not None:
             await tx.run(query, uuid=node.uuid)
         else:
@@ -107,14 +102,11 @@ class OracleEpisodeNodeOperations(EpisodeNodeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        query = """
-            MATCH (n:Episodic {group_id: $group_id})
-            DETACH DELETE n
-        """
+        query = 'DELETE FROM GRAPHITI_EPISODIC_NODES WHERE GROUP_ID = $group_id'
         if tx is not None:
-            await tx.run(query, group_id=group_id, batch_size=batch_size)
+            await tx.run(query, group_id=group_id)
         else:
-            await executor.execute_query(query, group_id=group_id, batch_size=batch_size)
+            await executor.execute_query(query, group_id=group_id)
 
     async def delete_by_uuids(
         self,
@@ -123,30 +115,34 @@ class OracleEpisodeNodeOperations(EpisodeNodeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        query = """
-            MATCH (n:Episodic)
-            WHERE n.uuid IN $uuids
-            DETACH DELETE n
-        """
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f'DELETE FROM GRAPHITI_EPISODIC_NODES WHERE {clause}'
         if tx is not None:
-            await tx.run(query, uuids=uuids, batch_size=batch_size)
+            await tx.run(query, **params)
         else:
-            await executor.execute_query(query, uuids=uuids, batch_size=batch_size)
+            await executor.execute_query(query, **params)
 
     async def get_by_uuid(
         self,
         executor: QueryExecutor,
         uuid: str,
     ) -> EpisodicNode:
-        query = (
-            """
-            MATCH (e:Episodic {uuid: $uuid})
-            RETURN
-            """
-            + EPISODIC_NODE_RETURN
-        )
-        records, _, _ = await executor.execute_query(query, uuid=uuid, routing_='r')
-        episodes = [episodic_node_from_record(r) for r in records]
+        query = """
+            SELECT
+                UUID AS uuid,
+                NAME AS name,
+                GROUP_ID AS group_id,
+                SOURCE_DESCRIPTION AS source_description,
+                CONTENT AS content,
+                ENTITY_EDGES_JSON AS entity_edges_json,
+                CREATED_AT AS created_at,
+                VALID_AT AS valid_at,
+                SOURCE AS source
+            FROM GRAPHITI_EPISODIC_NODES
+            WHERE UUID = $uuid
+        """
+        records, _, _ = await executor.execute_query(query, uuid=uuid)
+        episodes = [_episodic_node_from_sql_record(r) for r in records]
         if len(episodes) == 0:
             raise NodeNotFoundError(uuid)
         return episodes[0]
@@ -156,16 +152,23 @@ class OracleEpisodeNodeOperations(EpisodeNodeOperations):
         executor: QueryExecutor,
         uuids: list[str],
     ) -> list[EpisodicNode]:
-        query = (
-            """
-            MATCH (e:Episodic)
-            WHERE e.uuid IN $uuids
-            RETURN DISTINCT
-            """
-            + EPISODIC_NODE_RETURN
-        )
-        records, _, _ = await executor.execute_query(query, uuids=uuids, routing_='r')
-        return [episodic_node_from_record(r) for r in records]
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                NAME AS name,
+                GROUP_ID AS group_id,
+                SOURCE_DESCRIPTION AS source_description,
+                CONTENT AS content,
+                ENTITY_EDGES_JSON AS entity_edges_json,
+                CREATED_AT AS created_at,
+                VALID_AT AS valid_at,
+                SOURCE AS source
+            FROM GRAPHITI_EPISODIC_NODES
+            WHERE {clause}
+        """
+        records, _, _ = await executor.execute_query(query, **params)
+        return [_episodic_node_from_sql_record(r) for r in records]
 
     async def get_by_group_ids(
         self,
@@ -174,48 +177,53 @@ class OracleEpisodeNodeOperations(EpisodeNodeOperations):
         limit: int | None = None,
         uuid_cursor: str | None = None,
     ) -> list[EpisodicNode]:
-        cursor_clause = 'AND e.uuid < $uuid' if uuid_cursor else ''
-        limit_clause = 'LIMIT $limit' if limit is not None else ''
-        query = (
-            """
-            MATCH (e:Episodic)
-            WHERE e.group_id IN $group_ids
-            """
-            + cursor_clause
-            + """
-            RETURN DISTINCT
-            """
-            + EPISODIC_NODE_RETURN
-            + """
-            ORDER BY uuid DESC
-            """
-            + limit_clause
-        )
-        records, _, _ = await executor.execute_query(
-            query,
-            group_ids=group_ids,
-            uuid=uuid_cursor,
-            limit=limit,
-            routing_='r',
-        )
-        return [episodic_node_from_record(r) for r in records]
+        where_clause, where_params = build_in_clause('GROUP_ID', 'group_id', group_ids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                NAME AS name,
+                GROUP_ID AS group_id,
+                SOURCE_DESCRIPTION AS source_description,
+                CONTENT AS content,
+                ENTITY_EDGES_JSON AS entity_edges_json,
+                CREATED_AT AS created_at,
+                VALID_AT AS valid_at,
+                SOURCE AS source
+            FROM GRAPHITI_EPISODIC_NODES
+            WHERE {where_clause}
+        """
+        params = dict(where_params)
+        if uuid_cursor is not None:
+            query += ' AND UUID < $uuid'
+            params['uuid'] = uuid_cursor
+        query += ' ORDER BY UUID DESC'
+        records, _, _ = await executor.execute_query(query, **params)
+        if limit is not None:
+            records = records[:limit]
+        return [_episodic_node_from_sql_record(r) for r in records]
 
     async def get_by_entity_node_uuid(
         self,
         executor: QueryExecutor,
         entity_node_uuid: str,
     ) -> list[EpisodicNode]:
-        query = (
-            """
-            MATCH (e:Episodic)-[r:MENTIONS]->(n:Entity {uuid: $entity_node_uuid})
-            RETURN DISTINCT
-            """
-            + EPISODIC_NODE_RETURN
-        )
-        records, _, _ = await executor.execute_query(
-            query, entity_node_uuid=entity_node_uuid, routing_='r'
-        )
-        return [episodic_node_from_record(r) for r in records]
+        query = """
+            SELECT
+                e.UUID AS uuid,
+                e.NAME AS name,
+                e.GROUP_ID AS group_id,
+                e.SOURCE_DESCRIPTION AS source_description,
+                e.CONTENT AS content,
+                e.ENTITY_EDGES_JSON AS entity_edges_json,
+                e.CREATED_AT AS created_at,
+                e.VALID_AT AS valid_at,
+                e.SOURCE AS source
+            FROM GRAPHITI_EPISODIC_NODES e
+            JOIN GRAPHITI_MENTIONS_EDGES m ON m.SOURCE_NODE_UUID = e.UUID
+            WHERE m.TARGET_NODE_UUID = $entity_node_uuid
+        """
+        records, _, _ = await executor.execute_query(query, entity_node_uuid=entity_node_uuid)
+        return [_episodic_node_from_sql_record(r) for r in records]
 
     async def retrieve_episodes(
         self,
@@ -226,58 +234,79 @@ class OracleEpisodeNodeOperations(EpisodeNodeOperations):
         source: str | None = None,
         saga: str | None = None,
     ) -> list[EpisodicNode]:
+        records: list[dict[str, Any]] = []
         if saga is not None and group_ids is not None and len(group_ids) > 0:
-            source_clause = 'AND e.source = $source' if source else ''
-            query = (
+            saga_records, _, _ = await executor.execute_query(
                 """
-                MATCH (s:Saga {name: $saga_name, group_id: $group_id})-[:HAS_EPISODE]->(e:Episodic)
-                WHERE e.valid_at <= $reference_time
-                """
-                + source_clause
-                + """
-                RETURN
-                """
-                + EPISODIC_NODE_RETURN
-                + """
-                ORDER BY e.valid_at DESC
-                LIMIT $num_episodes
-                """
-            )
-            records, _, _ = await executor.execute_query(
-                query,
+                SELECT UUID AS uuid
+                FROM GRAPHITI_SAGA_NODES
+                WHERE NAME = $saga_name
+                  AND GROUP_ID = $group_id
+                """,
                 saga_name=saga,
                 group_id=group_ids[0],
-                reference_time=reference_time,
-                source=source,
-                num_episodes=last_n,
-                routing_='r',
             )
+            if len(saga_records) == 0:
+                return []
+            saga_uuid = saga_records[0]['uuid']
+            edge_records, _, _ = await executor.execute_query(
+                """
+                SELECT TARGET_NODE_UUID AS episode_uuid
+                FROM GRAPHITI_HAS_EPISODE_EDGES
+                WHERE SOURCE_NODE_UUID = $saga_uuid
+                """,
+                saga_uuid=saga_uuid,
+            )
+            episode_uuids = [r['episode_uuid'] for r in edge_records]
+            if not episode_uuids:
+                return []
+            clause, params = build_in_clause('UUID', 'uuid', episode_uuids)
+            query = f"""
+                SELECT
+                    UUID AS uuid,
+                    NAME AS name,
+                    GROUP_ID AS group_id,
+                    SOURCE_DESCRIPTION AS source_description,
+                    CONTENT AS content,
+                    ENTITY_EDGES_JSON AS entity_edges_json,
+                    CREATED_AT AS created_at,
+                    VALID_AT AS valid_at,
+                    SOURCE AS source
+                FROM GRAPHITI_EPISODIC_NODES
+                WHERE VALID_AT <= $reference_time
+                  AND {clause}
+            """
+            params['reference_time'] = reference_time
+            if source is not None:
+                query += ' AND SOURCE = $source'
+                params['source'] = source
+            query += ' ORDER BY VALID_AT DESC'
+            records, _, _ = await executor.execute_query(query, **params)
         else:
-            source_clause = 'AND e.source = $source' if source else ''
-            group_clause = 'AND e.group_id IN $group_ids' if group_ids else ''
-            query = (
-                """
-                MATCH (e:Episodic)
-                WHERE e.valid_at <= $reference_time
-                """
-                + group_clause
-                + source_clause
-                + """
-                RETURN
-                """
-                + EPISODIC_NODE_RETURN
-                + """
-                ORDER BY e.valid_at DESC
-                LIMIT $num_episodes
-                """
-            )
-            records, _, _ = await executor.execute_query(
-                query,
-                reference_time=reference_time,
-                group_ids=group_ids,
-                source=source,
-                num_episodes=last_n,
-                routing_='r',
-            )
+            query = """
+                SELECT
+                    UUID AS uuid,
+                    NAME AS name,
+                    GROUP_ID AS group_id,
+                    SOURCE_DESCRIPTION AS source_description,
+                    CONTENT AS content,
+                    ENTITY_EDGES_JSON AS entity_edges_json,
+                    CREATED_AT AS created_at,
+                    VALID_AT AS valid_at,
+                    SOURCE AS source
+                FROM GRAPHITI_EPISODIC_NODES
+                WHERE VALID_AT <= $reference_time
+            """
+            params: dict[str, Any] = {'reference_time': reference_time}
+            if group_ids:
+                clause, group_params = build_in_clause('GROUP_ID', 'group_id', group_ids)
+                query += f' AND {clause}'
+                params.update(group_params)
+            if source is not None:
+                query += ' AND SOURCE = $source'
+                params['source'] = source
+            query += ' ORDER BY VALID_AT DESC'
+            records, _, _ = await executor.execute_query(query, **params)
 
-        return [episodic_node_from_record(r) for r in records]
+        records = records[:last_n]
+        return [_episodic_node_from_sql_record(r) for r in records]

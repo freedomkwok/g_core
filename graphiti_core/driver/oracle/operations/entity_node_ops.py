@@ -17,19 +17,22 @@ limitations under the License.
 import logging
 from typing import Any
 
-from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.operations.entity_node_ops import EntityNodeOperations
+from graphiti_core.driver.oracle.sql_utils import build_in_clause, dumps_json, loads_json
 from graphiti_core.driver.query_executor import QueryExecutor, Transaction
 from graphiti_core.driver.record_parsers import entity_node_from_record
 from graphiti_core.errors import NodeNotFoundError
-from graphiti_core.models.nodes.node_db_queries import (
-    get_entity_node_return_query,
-    get_entity_node_save_bulk_query,
-    get_entity_node_save_query,
-)
 from graphiti_core.nodes import EntityNode
 
 logger = logging.getLogger(__name__)
+
+
+def _entity_node_from_sql_record(record: dict[str, Any]) -> EntityNode:
+    prepared = dict(record)
+    prepared['labels'] = loads_json(prepared.get('labels_json'), [])
+    prepared['attributes'] = loads_json(prepared.get('attributes_json'), {})
+    prepared['name_embedding'] = loads_json(prepared.get('name_embedding_json'), None)
+    return entity_node_from_record(prepared)
 
 
 class OracleEntityNodeOperations(EntityNodeOperations):
@@ -39,23 +42,31 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         node: EntityNode,
         tx: Transaction | None = None,
     ) -> None:
-        entity_data: dict[str, Any] = {
+        labels = list(set(node.labels + ['Entity']))
+        delete_query = 'DELETE FROM GRAPHITI_ENTITY_NODES WHERE UUID = $uuid'
+        insert_query = """
+            INSERT INTO GRAPHITI_ENTITY_NODES (
+                UUID, NAME, GROUP_ID, LABELS_JSON, CREATED_AT, SUMMARY, NAME_EMBEDDING_JSON, ATTRIBUTES_JSON
+            ) VALUES (
+                $uuid, $name, $group_id, $labels_json, $created_at, $summary, $name_embedding_json, $attributes_json
+            )
+        """
+        params: dict[str, Any] = {
             'uuid': node.uuid,
             'name': node.name,
-            'name_embedding': node.name_embedding,
             'group_id': node.group_id,
-            'summary': node.summary,
+            'labels_json': dumps_json(labels),
             'created_at': node.created_at,
+            'summary': node.summary,
+            'name_embedding_json': dumps_json(node.name_embedding),
+            'attributes_json': dumps_json(node.attributes or {}),
         }
-        entity_data.update(node.attributes or {})
-        labels = ':'.join(list(set(node.labels + ['Entity'])))
-
-        query = get_entity_node_save_query(GraphProvider.ORACLE, labels)
-
         if tx is not None:
-            await tx.run(query, entity_data=entity_data)
+            await tx.run(delete_query, uuid=node.uuid)
+            await tx.run(insert_query, **params)
         else:
-            await executor.execute_query(query, entity_data=entity_data)
+            await executor.execute_query(delete_query, uuid=node.uuid)
+            await executor.execute_query(insert_query, **params)
 
         logger.debug(f'Saved Node to Graph: {node.uuid}')
 
@@ -66,26 +77,8 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        prepared: list[dict[str, Any]] = []
         for node in nodes:
-            entity_data: dict[str, Any] = {
-                'uuid': node.uuid,
-                'name': node.name,
-                'group_id': node.group_id,
-                'summary': node.summary,
-                'created_at': node.created_at,
-                'name_embedding': node.name_embedding,
-                'labels': list(set(node.labels + ['Entity'])),
-            }
-            entity_data.update(node.attributes or {})
-            prepared.append(entity_data)
-
-        query = get_entity_node_save_bulk_query(GraphProvider.ORACLE, prepared)
-
-        if tx is not None:
-            await tx.run(query, nodes=prepared)
-        else:
-            await executor.execute_query(query, nodes=prepared)
+            await self.save(executor, node, tx=tx)
 
     async def delete(
         self,
@@ -93,19 +86,11 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         node: EntityNode,
         tx: Transaction | None = None,
     ) -> None:
-        query = """
-            MATCH (n {uuid: $uuid})
-            WHERE n:Entity OR n:Episodic OR n:Community
-            OPTIONAL MATCH (n)-[r]-()
-            WITH collect(r.uuid) AS edge_uuids, n
-            DETACH DELETE n
-            RETURN edge_uuids
-        """
+        query = 'DELETE FROM GRAPHITI_ENTITY_NODES WHERE UUID = $uuid'
         if tx is not None:
             await tx.run(query, uuid=node.uuid)
         else:
             await executor.execute_query(query, uuid=node.uuid)
-
         logger.debug(f'Deleted Node: {node.uuid}')
 
     async def delete_by_group_id(
@@ -115,14 +100,11 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        query = """
-            MATCH (n:Entity {group_id: $group_id})
-            DETACH DELETE n
-        """
+        query = 'DELETE FROM GRAPHITI_ENTITY_NODES WHERE GROUP_ID = $group_id'
         if tx is not None:
-            await tx.run(query, group_id=group_id, batch_size=batch_size)
+            await tx.run(query, group_id=group_id)
         else:
-            await executor.execute_query(query, group_id=group_id, batch_size=batch_size)
+            await executor.execute_query(query, group_id=group_id)
 
     async def delete_by_uuids(
         self,
@@ -131,15 +113,12 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         tx: Transaction | None = None,
         batch_size: int = 100,
     ) -> None:
-        query = """
-            MATCH (n:Entity)
-            WHERE n.uuid IN $uuids
-            DETACH DELETE n
-        """
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f'DELETE FROM GRAPHITI_ENTITY_NODES WHERE {clause}'
         if tx is not None:
-            await tx.run(query, uuids=uuids, batch_size=batch_size)
+            await tx.run(query, **params)
         else:
-            await executor.execute_query(query, uuids=uuids, batch_size=batch_size)
+            await executor.execute_query(query, **params)
 
     async def get_by_uuid(
         self,
@@ -147,11 +126,20 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         uuid: str,
     ) -> EntityNode:
         query = """
-            MATCH (n:Entity {uuid: $uuid})
-            RETURN
-            """ + get_entity_node_return_query(GraphProvider.ORACLE)
-        records, _, _ = await executor.execute_query(query, uuid=uuid, routing_='r')
-        nodes = [entity_node_from_record(r) for r in records]
+            SELECT
+                UUID AS uuid,
+                NAME AS name,
+                GROUP_ID AS group_id,
+                CREATED_AT AS created_at,
+                SUMMARY AS summary,
+                LABELS_JSON AS labels_json,
+                ATTRIBUTES_JSON AS attributes_json,
+                NAME_EMBEDDING_JSON AS name_embedding_json
+            FROM GRAPHITI_ENTITY_NODES
+            WHERE UUID = $uuid
+        """
+        records, _, _ = await executor.execute_query(query, uuid=uuid)
+        nodes = [_entity_node_from_sql_record(r) for r in records]
         if len(nodes) == 0:
             raise NodeNotFoundError(uuid)
         return nodes[0]
@@ -161,13 +149,22 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         executor: QueryExecutor,
         uuids: list[str],
     ) -> list[EntityNode]:
-        query = """
-            MATCH (n:Entity)
-            WHERE n.uuid IN $uuids
-            RETURN
-            """ + get_entity_node_return_query(GraphProvider.ORACLE)
-        records, _, _ = await executor.execute_query(query, uuids=uuids, routing_='r')
-        return [entity_node_from_record(r) for r in records]
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                NAME AS name,
+                GROUP_ID AS group_id,
+                CREATED_AT AS created_at,
+                SUMMARY AS summary,
+                LABELS_JSON AS labels_json,
+                ATTRIBUTES_JSON AS attributes_json,
+                NAME_EMBEDDING_JSON AS name_embedding_json
+            FROM GRAPHITI_ENTITY_NODES
+            WHERE {clause}
+        """
+        records, _, _ = await executor.execute_query(query, **params)
+        return [_entity_node_from_sql_record(r) for r in records]
 
     async def get_by_group_ids(
         self,
@@ -176,31 +173,29 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         limit: int | None = None,
         uuid_cursor: str | None = None,
     ) -> list[EntityNode]:
-        cursor_clause = 'AND n.uuid < $uuid' if uuid_cursor else ''
-        limit_clause = 'LIMIT $limit' if limit is not None else ''
-        query = (
-            """
-            MATCH (n:Entity)
-            WHERE n.group_id IN $group_ids
-            """
-            + cursor_clause
-            + """
-            RETURN
-            """
-            + get_entity_node_return_query(GraphProvider.ORACLE)
-            + """
-            ORDER BY n.uuid DESC
-            """
-            + limit_clause
-        )
-        records, _, _ = await executor.execute_query(
-            query,
-            group_ids=group_ids,
-            uuid=uuid_cursor,
-            limit=limit,
-            routing_='r',
-        )
-        return [entity_node_from_record(r) for r in records]
+        where_clause, where_params = build_in_clause('GROUP_ID', 'group_id', group_ids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                NAME AS name,
+                GROUP_ID AS group_id,
+                CREATED_AT AS created_at,
+                SUMMARY AS summary,
+                LABELS_JSON AS labels_json,
+                ATTRIBUTES_JSON AS attributes_json,
+                NAME_EMBEDDING_JSON AS name_embedding_json
+            FROM GRAPHITI_ENTITY_NODES
+            WHERE {where_clause}
+        """
+        params = dict(where_params)
+        if uuid_cursor is not None:
+            query += ' AND UUID < $uuid'
+            params['uuid'] = uuid_cursor
+        query += ' ORDER BY UUID DESC'
+        records, _, _ = await executor.execute_query(query, **params)
+        if limit is not None:
+            records = records[:limit]
+        return [_entity_node_from_sql_record(r) for r in records]
 
     async def load_embeddings(
         self,
@@ -208,13 +203,14 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         node: EntityNode,
     ) -> None:
         query = """
-            MATCH (n:Entity {uuid: $uuid})
-            RETURN n.name_embedding AS name_embedding
+            SELECT NAME_EMBEDDING_JSON AS name_embedding_json
+            FROM GRAPHITI_ENTITY_NODES
+            WHERE UUID = $uuid
         """
-        records, _, _ = await executor.execute_query(query, uuid=node.uuid, routing_='r')
+        records, _, _ = await executor.execute_query(query, uuid=node.uuid)
         if len(records) == 0:
             raise NodeNotFoundError(node.uuid)
-        node.name_embedding = records[0]['name_embedding']
+        node.name_embedding = loads_json(records[0].get('name_embedding_json'), None)
 
     async def load_embeddings_bulk(
         self,
@@ -223,13 +219,14 @@ class OracleEntityNodeOperations(EntityNodeOperations):
         batch_size: int = 100,
     ) -> None:
         uuids = [n.uuid for n in nodes]
-        query = """
-            MATCH (n:Entity)
-            WHERE n.uuid IN $uuids
-            RETURN DISTINCT n.uuid AS uuid, n.name_embedding AS name_embedding
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f"""
+            SELECT UUID AS uuid, NAME_EMBEDDING_JSON AS name_embedding_json
+            FROM GRAPHITI_ENTITY_NODES
+            WHERE {clause}
         """
-        records, _, _ = await executor.execute_query(query, uuids=uuids, routing_='r')
-        embedding_map = {r['uuid']: r['name_embedding'] for r in records}
+        records, _, _ = await executor.execute_query(query, **params)
+        embedding_map = {r['uuid']: loads_json(r.get('name_embedding_json'), None) for r in records}
         for node in nodes:
             if node.uuid in embedding_map:
                 node.name_embedding = embedding_map[node.uuid]

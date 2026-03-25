@@ -14,10 +14,159 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from graphiti_core.driver.neo4j.operations.next_episode_edge_ops import (
-    Neo4jNextEpisodeEdgeOperations,
-)
+import logging
+from typing import Any
+
+from graphiti_core.driver.operations.next_episode_edge_ops import NextEpisodeEdgeOperations
+from graphiti_core.driver.oracle.sql_utils import build_in_clause
+from graphiti_core.driver.query_executor import QueryExecutor, Transaction
+from graphiti_core.edges import NextEpisodeEdge
+from graphiti_core.errors import EdgeNotFoundError
+from graphiti_core.helpers import parse_db_date
+
+logger = logging.getLogger(__name__)
 
 
-class OracleNextEpisodeEdgeOperations(Neo4jNextEpisodeEdgeOperations):
-    """Oracle NEXT_EPISODE edge operations."""
+def _next_episode_edge_from_record(record: Any) -> NextEpisodeEdge:
+    return NextEpisodeEdge(
+        uuid=record['uuid'],
+        group_id=record['group_id'],
+        source_node_uuid=record['source_node_uuid'],
+        target_node_uuid=record['target_node_uuid'],
+        created_at=parse_db_date(record['created_at']),  # type: ignore[arg-type]
+    )
+
+
+class OracleNextEpisodeEdgeOperations(NextEpisodeEdgeOperations):
+    async def save(
+        self,
+        executor: QueryExecutor,
+        edge: NextEpisodeEdge,
+        tx: Transaction | None = None,
+    ) -> None:
+        delete_query = 'DELETE FROM GRAPHITI_NEXT_EPISODE_EDGES WHERE UUID = $uuid'
+        insert_query = """
+            INSERT INTO GRAPHITI_NEXT_EPISODE_EDGES (
+                UUID, GROUP_ID, SOURCE_NODE_UUID, TARGET_NODE_UUID, CREATED_AT
+            ) VALUES (
+                $uuid, $group_id, $source_node_uuid, $target_node_uuid, $created_at
+            )
+        """
+        params: dict[str, Any] = {
+            'uuid': edge.uuid,
+            'group_id': edge.group_id,
+            'source_node_uuid': edge.source_node_uuid,
+            'target_node_uuid': edge.target_node_uuid,
+            'created_at': edge.created_at,
+        }
+        if tx is not None:
+            await tx.run(delete_query, uuid=edge.uuid)
+            await tx.run(insert_query, **params)
+        else:
+            await executor.execute_query(delete_query, uuid=edge.uuid)
+            await executor.execute_query(insert_query, **params)
+
+        logger.debug(f'Saved Edge to Graph: {edge.uuid}')
+
+    async def save_bulk(
+        self,
+        executor: QueryExecutor,
+        edges: list[NextEpisodeEdge],
+        tx: Transaction | None = None,
+        batch_size: int = 100,
+    ) -> None:
+        for edge in edges:
+            await self.save(executor, edge, tx=tx)
+
+    async def delete(
+        self,
+        executor: QueryExecutor,
+        edge: NextEpisodeEdge,
+        tx: Transaction | None = None,
+    ) -> None:
+        query = 'DELETE FROM GRAPHITI_NEXT_EPISODE_EDGES WHERE UUID = $uuid'
+        if tx is not None:
+            await tx.run(query, uuid=edge.uuid)
+        else:
+            await executor.execute_query(query, uuid=edge.uuid)
+
+    async def delete_by_uuids(
+        self,
+        executor: QueryExecutor,
+        uuids: list[str],
+        tx: Transaction | None = None,
+    ) -> None:
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f'DELETE FROM GRAPHITI_NEXT_EPISODE_EDGES WHERE {clause}'
+        if tx is not None:
+            await tx.run(query, **params)
+        else:
+            await executor.execute_query(query, **params)
+
+    async def get_by_uuid(
+        self,
+        executor: QueryExecutor,
+        uuid: str,
+    ) -> NextEpisodeEdge:
+        query = """
+            SELECT
+                UUID AS uuid,
+                GROUP_ID AS group_id,
+                SOURCE_NODE_UUID AS source_node_uuid,
+                TARGET_NODE_UUID AS target_node_uuid,
+                CREATED_AT AS created_at
+            FROM GRAPHITI_NEXT_EPISODE_EDGES
+            WHERE UUID = $uuid
+        """
+        records, _, _ = await executor.execute_query(query, uuid=uuid)
+        edges = [_next_episode_edge_from_record(r) for r in records]
+        if len(edges) == 0:
+            raise EdgeNotFoundError(uuid)
+        return edges[0]
+
+    async def get_by_uuids(
+        self,
+        executor: QueryExecutor,
+        uuids: list[str],
+    ) -> list[NextEpisodeEdge]:
+        clause, params = build_in_clause('UUID', 'uuid', uuids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                GROUP_ID AS group_id,
+                SOURCE_NODE_UUID AS source_node_uuid,
+                TARGET_NODE_UUID AS target_node_uuid,
+                CREATED_AT AS created_at
+            FROM GRAPHITI_NEXT_EPISODE_EDGES
+            WHERE {clause}
+        """
+        records, _, _ = await executor.execute_query(query, **params)
+        return [_next_episode_edge_from_record(r) for r in records]
+
+    async def get_by_group_ids(
+        self,
+        executor: QueryExecutor,
+        group_ids: list[str],
+        limit: int | None = None,
+        uuid_cursor: str | None = None,
+    ) -> list[NextEpisodeEdge]:
+        where_clause, where_params = build_in_clause('GROUP_ID', 'group_id', group_ids)
+        query = f"""
+            SELECT
+                UUID AS uuid,
+                GROUP_ID AS group_id,
+                SOURCE_NODE_UUID AS source_node_uuid,
+                TARGET_NODE_UUID AS target_node_uuid,
+                CREATED_AT AS created_at
+            FROM GRAPHITI_NEXT_EPISODE_EDGES
+            WHERE {where_clause}
+        """
+        params = dict(where_params)
+        if uuid_cursor is not None:
+            query += ' AND UUID < $uuid'
+            params['uuid'] = uuid_cursor
+        query += ' ORDER BY UUID DESC'
+        records, _, _ = await executor.execute_query(query, **params)
+        if limit is not None:
+            records = records[:limit]
+        return [_next_episode_edge_from_record(r) for r in records]

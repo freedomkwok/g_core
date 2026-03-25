@@ -178,7 +178,7 @@ async def test_execute_query_uses_oracledb_when_no_query_runner(monkeypatch):
     assert fake_oracledb.create_pool_async_calls == [
         {'user': 'scott', 'password': 'tiger', 'dsn': 'dbhost:1521/service_name'}
     ]
-    assert fake_cursor.executed == [('SELECT :uuid AS uuid FROM dual', {'uuid': 'abc'})]
+    assert fake_cursor.executed[-1] == ('SELECT :uuid AS uuid FROM dual', {'uuid': 'abc'})
     assert records == [{'uuid': 'abc'}]
     assert keys == ['uuid']
     assert summary is None
@@ -221,8 +221,11 @@ async def test_execute_query_reuses_single_native_connection(monkeypatch):
     await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='def')
 
     assert len(fake_oracledb.create_pool_async_calls) == 1
-    assert fake_oracledb._pool.acquire_calls == 2
-    assert len(fake_cursor.executed) == 2
+    assert fake_oracledb._pool.acquire_calls == 3
+    assert fake_cursor.executed[-2:] == [
+        ('SELECT :uuid AS uuid FROM dual', {'uuid': 'abc'}),
+        ('SELECT :uuid AS uuid FROM dual', {'uuid': 'def'}),
+    ]
 
 
 @pytest.mark.asyncio

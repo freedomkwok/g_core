@@ -14,12 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from graphiti_core.driver.driver import GraphProvider
-from graphiti_core.driver.oracle_driver import OracleDriver
+from graphiti_core.driver.driver import GraphDriver, GraphProvider
 from graphiti_core.models.edges.edge_db_queries import (
     get_community_edge_save_query,
     get_entity_edge_save_bulk_query,
@@ -90,9 +89,9 @@ class _OracleDeleteDriverStub:
 
 @pytest.mark.asyncio
 async def test_oracle_node_delete_by_uuids_avoids_in_transactions():
-    driver = OracleDriver(_OracleDeleteDriverStub())
+    driver = _OracleDeleteDriverStub()
 
-    await EntityNode.delete_by_uuids(driver, ['abc'])
+    await EntityNode.delete_by_uuids(cast(GraphDriver, driver), ['abc'])
 
-    assert len(driver.queries) == 3
+    assert len(driver.queries) == 9
     assert all('IN TRANSACTIONS' not in query for query in driver.queries)

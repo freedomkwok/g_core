@@ -17,17 +17,11 @@ limitations under the License.
 import logging
 from typing import Any
 
-from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.driver.operations.graph_ops import GraphMaintenanceOperations
 from graphiti_core.driver.operations.graph_utils import Neighbor, label_propagation
+from graphiti_core.driver.oracle.sql_utils import build_in_clause, loads_json
 from graphiti_core.driver.query_executor import QueryExecutor
 from graphiti_core.driver.record_parsers import community_node_from_record, entity_node_from_record
-from graphiti_core.graph_queries import get_fulltext_indices, get_range_indices
-from graphiti_core.helpers import semaphore_gather
-from graphiti_core.models.nodes.node_db_queries import (
-    COMMUNITY_NODE_RETURN,
-    get_entity_node_return_query,
-)
 from graphiti_core.nodes import CommunityNode, EntityNode, EpisodicNode
 
 logger = logging.getLogger(__name__)
@@ -40,31 +34,43 @@ class OracleGraphMaintenanceOperations(GraphMaintenanceOperations):
         group_ids: list[str] | None = None,
     ) -> None:
         if group_ids is None:
-            await executor.execute_query('MATCH (n) DETACH DELETE n')
-        else:
-            for label in ['Entity', 'Episodic', 'Community']:
-                await executor.execute_query(
-                    f"""
-                    MATCH (n:{label})
-                    WHERE n.group_id IN $group_ids
-                    DETACH DELETE n
-                    """,
-                    group_ids=group_ids,
-                )
+            for table in [
+                'GRAPHITI_RELATES_TO_EDGES',
+                'GRAPHITI_MENTIONS_EDGES',
+                'GRAPHITI_HAS_MEMBER_EDGES',
+                'GRAPHITI_HAS_EPISODE_EDGES',
+                'GRAPHITI_NEXT_EPISODE_EDGES',
+                'GRAPHITI_ENTITY_NODES',
+                'GRAPHITI_EPISODIC_NODES',
+                'GRAPHITI_COMMUNITY_NODES',
+                'GRAPHITI_SAGA_NODES',
+            ]:
+                await executor.execute_query(f'DELETE FROM {table}')
+            return
+
+        where_clause, where_params = build_in_clause('GROUP_ID', 'group_id', group_ids)
+        for table in [
+            'GRAPHITI_RELATES_TO_EDGES',
+            'GRAPHITI_MENTIONS_EDGES',
+            'GRAPHITI_HAS_MEMBER_EDGES',
+            'GRAPHITI_HAS_EPISODE_EDGES',
+            'GRAPHITI_NEXT_EPISODE_EDGES',
+            'GRAPHITI_ENTITY_NODES',
+            'GRAPHITI_EPISODIC_NODES',
+            'GRAPHITI_COMMUNITY_NODES',
+            'GRAPHITI_SAGA_NODES',
+        ]:
+            await executor.execute_query(f'DELETE FROM {table} WHERE {where_clause}', **where_params)
 
     async def build_indices_and_constraints(
         self,
         executor: QueryExecutor,
         delete_existing: bool = False,
     ) -> None:
+        # Native Oracle schema and indexes are auto-created by OracleDriver.
         if delete_existing:
             await self.delete_all_indexes(executor)
-
-        range_indices = get_range_indices(GraphProvider.ORACLE)
-        fulltext_indices = get_fulltext_indices(GraphProvider.ORACLE)
-        index_queries = range_indices + fulltext_indices
-
-        await semaphore_gather(*[executor.execute_query(q) for q in index_queries])
+        return
 
     async def delete_all_indexes(
         self,
@@ -83,13 +89,12 @@ class OracleGraphMaintenanceOperations(GraphMaintenanceOperations):
         if group_ids is None:
             group_id_values, _, _ = await executor.execute_query(
                 """
-                MATCH (n:Entity)
-                WHERE n.group_id IS NOT NULL
-                RETURN
-                    collect(DISTINCT n.group_id) AS group_ids
+                SELECT DISTINCT GROUP_ID AS group_id
+                FROM GRAPHITI_ENTITY_NODES
+                WHERE GROUP_ID IS NOT NULL
                 """
             )
-            group_ids = group_id_values[0]['group_ids'] if group_id_values else []
+            group_ids = [r['group_id'] for r in group_id_values]
 
         resolved_group_ids: list[str] = group_ids or []
         for group_id in resolved_group_ids:
@@ -97,24 +102,43 @@ class OracleGraphMaintenanceOperations(GraphMaintenanceOperations):
 
             node_records, _, _ = await executor.execute_query(
                 """
-                MATCH (n:Entity)
-                WHERE n.group_id IN $group_ids
-                RETURN
-                """
-                + get_entity_node_return_query(GraphProvider.ORACLE),
-                group_ids=[group_id],
-                routing_='r',
+                SELECT
+                    UUID AS uuid,
+                    NAME AS name,
+                    GROUP_ID AS group_id,
+                    CREATED_AT AS created_at,
+                    SUMMARY AS summary,
+                    LABELS_JSON AS labels,
+                    ATTRIBUTES_JSON AS attributes,
+                    NAME_EMBEDDING_JSON AS name_embedding
+                FROM GRAPHITI_ENTITY_NODES
+                WHERE GROUP_ID = $group_id
+                """,
+                group_id=group_id,
             )
+            for record in node_records:
+                record['labels'] = loads_json(record.get('labels'), [])
+                record['attributes'] = loads_json(record.get('attributes'), {})
+                record['name_embedding'] = loads_json(record.get('name_embedding'), None)
             nodes = [entity_node_from_record(r) for r in node_records]
 
             for node in nodes:
                 records, _, _ = await executor.execute_query(
                     """
-                    MATCH (n:Entity {group_id: $group_id, uuid: $uuid})-[e:RELATES_TO]-(m: Entity {group_id: $group_id})
-                    WITH count(e) AS count, m.uuid AS uuid
-                    RETURN
-                        uuid,
-                        count
+                    SELECT
+                        CASE
+                            WHEN SOURCE_NODE_UUID = $uuid THEN TARGET_NODE_UUID
+                            ELSE SOURCE_NODE_UUID
+                        END AS uuid,
+                        COUNT(*) AS count
+                    FROM GRAPHITI_RELATES_TO_EDGES
+                    WHERE GROUP_ID = $group_id
+                      AND (SOURCE_NODE_UUID = $uuid OR TARGET_NODE_UUID = $uuid)
+                    GROUP BY
+                        CASE
+                            WHEN SOURCE_NODE_UUID = $uuid THEN TARGET_NODE_UUID
+                            ELSE SOURCE_NODE_UUID
+                        END
                     """,
                     uuid=node.uuid,
                     group_id=group_id,
@@ -130,16 +154,27 @@ class OracleGraphMaintenanceOperations(GraphMaintenanceOperations):
             for cluster in cluster_uuids:
                 if not cluster:
                     continue
+                where_clause, where_params = build_in_clause('UUID', 'uuid', cluster)
                 cluster_records, _, _ = await executor.execute_query(
-                    """
-                    MATCH (n:Entity)
-                    WHERE n.uuid IN $uuids
-                    RETURN
-                    """
-                    + get_entity_node_return_query(GraphProvider.ORACLE),
-                    uuids=cluster,
-                    routing_='r',
+                    f"""
+                    SELECT
+                        UUID AS uuid,
+                        NAME AS name,
+                        GROUP_ID AS group_id,
+                        CREATED_AT AS created_at,
+                        SUMMARY AS summary,
+                        LABELS_JSON AS labels,
+                        ATTRIBUTES_JSON AS attributes,
+                        NAME_EMBEDDING_JSON AS name_embedding
+                    FROM GRAPHITI_ENTITY_NODES
+                    WHERE {where_clause}
+                    """,
+                    **where_params,
                 )
+                for record in cluster_records:
+                    record['labels'] = loads_json(record.get('labels'), [])
+                    record['attributes'] = loads_json(record.get('attributes'), {})
+                    record['name_embedding'] = loads_json(record.get('name_embedding'), None)
                 community_clusters.append([entity_node_from_record(r) for r in cluster_records])
 
         return community_clusters
@@ -148,12 +183,8 @@ class OracleGraphMaintenanceOperations(GraphMaintenanceOperations):
         self,
         executor: QueryExecutor,
     ) -> None:
-        await executor.execute_query(
-            """
-            MATCH (c:Community)
-            DETACH DELETE c
-            """
-        )
+        await executor.execute_query('DELETE FROM GRAPHITI_HAS_MEMBER_EDGES')
+        await executor.execute_query('DELETE FROM GRAPHITI_COMMUNITY_NODES')
 
     async def determine_entity_community(
         self,
@@ -162,22 +193,40 @@ class OracleGraphMaintenanceOperations(GraphMaintenanceOperations):
     ) -> None:
         records, _, _ = await executor.execute_query(
             """
-            MATCH (c:Community)-[:HAS_MEMBER]->(n:Entity {uuid: $entity_uuid})
-            RETURN
-            """
-            + COMMUNITY_NODE_RETURN,
+            SELECT
+                c.UUID AS uuid,
+                c.NAME AS name,
+                c.GROUP_ID AS group_id,
+                c.NAME_EMBEDDING_JSON AS name_embedding,
+                c.CREATED_AT AS created_at,
+                c.SUMMARY AS summary
+            FROM GRAPHITI_COMMUNITY_NODES c
+            JOIN GRAPHITI_HAS_MEMBER_EDGES e ON e.SOURCE_NODE_UUID = c.UUID
+            WHERE e.TARGET_NODE_UUID = $entity_uuid
+            """,
             entity_uuid=entity.uuid,
         )
+        for record in records:
+            record['name_embedding'] = loads_json(record.get('name_embedding'), [])
 
         if len(records) > 0:
             return
 
         await executor.execute_query(
             """
-            MATCH (c:Community)-[:HAS_MEMBER]->(m:Entity)-[:RELATES_TO]-(n:Entity {uuid: $entity_uuid})
-            RETURN
-            """
-            + COMMUNITY_NODE_RETURN,
+            SELECT DISTINCT
+                c.UUID AS uuid,
+                c.NAME AS name,
+                c.GROUP_ID AS group_id,
+                c.NAME_EMBEDDING_JSON AS name_embedding,
+                c.CREATED_AT AS created_at,
+                c.SUMMARY AS summary
+            FROM GRAPHITI_COMMUNITY_NODES c
+            JOIN GRAPHITI_HAS_MEMBER_EDGES hm ON hm.SOURCE_NODE_UUID = c.UUID
+            JOIN GRAPHITI_RELATES_TO_EDGES r
+              ON (r.SOURCE_NODE_UUID = hm.TARGET_NODE_UUID OR r.TARGET_NODE_UUID = hm.TARGET_NODE_UUID)
+            WHERE r.SOURCE_NODE_UUID = $entity_uuid OR r.TARGET_NODE_UUID = $entity_uuid
+            """,
             entity_uuid=entity.uuid,
         )
 
@@ -187,17 +236,31 @@ class OracleGraphMaintenanceOperations(GraphMaintenanceOperations):
         episodes: list[EpisodicNode],
     ) -> list[EntityNode]:
         episode_uuids = [episode.uuid for episode in episodes]
+        if len(episode_uuids) == 0:
+            return []
+        where_clause, where_params = build_in_clause('m.SOURCE_NODE_UUID', 'episode_uuid', episode_uuids)
 
         records, _, _ = await executor.execute_query(
-            """
-            MATCH (episode:Episodic)-[:MENTIONS]->(n:Entity)
-            WHERE episode.uuid IN $uuids
-            RETURN DISTINCT
-            """
-            + get_entity_node_return_query(GraphProvider.ORACLE),
-            uuids=episode_uuids,
-            routing_='r',
+            f"""
+            SELECT DISTINCT
+                n.UUID AS uuid,
+                n.NAME AS name,
+                n.GROUP_ID AS group_id,
+                n.CREATED_AT AS created_at,
+                n.SUMMARY AS summary,
+                n.LABELS_JSON AS labels,
+                n.ATTRIBUTES_JSON AS attributes,
+                n.NAME_EMBEDDING_JSON AS name_embedding
+            FROM GRAPHITI_ENTITY_NODES n
+            JOIN GRAPHITI_MENTIONS_EDGES m ON m.TARGET_NODE_UUID = n.UUID
+            WHERE {where_clause}
+            """,
+            **where_params,
         )
+        for record in records:
+            record['labels'] = loads_json(record.get('labels'), [])
+            record['attributes'] = loads_json(record.get('attributes'), {})
+            record['name_embedding'] = loads_json(record.get('name_embedding'), None)
 
         return [entity_node_from_record(r) for r in records]
 
@@ -207,16 +270,26 @@ class OracleGraphMaintenanceOperations(GraphMaintenanceOperations):
         nodes: list[EntityNode],
     ) -> list[CommunityNode]:
         node_uuids = [node.uuid for node in nodes]
+        if len(node_uuids) == 0:
+            return []
+        where_clause, where_params = build_in_clause('m.TARGET_NODE_UUID', 'node_uuid', node_uuids)
 
         records, _, _ = await executor.execute_query(
-            """
-            MATCH (c:Community)-[:HAS_MEMBER]->(m:Entity)
-            WHERE m.uuid IN $uuids
-            RETURN DISTINCT
-            """
-            + COMMUNITY_NODE_RETURN,
-            uuids=node_uuids,
-            routing_='r',
+            f"""
+            SELECT DISTINCT
+                c.UUID AS uuid,
+                c.NAME AS name,
+                c.GROUP_ID AS group_id,
+                c.NAME_EMBEDDING_JSON AS name_embedding,
+                c.CREATED_AT AS created_at,
+                c.SUMMARY AS summary
+            FROM GRAPHITI_COMMUNITY_NODES c
+            JOIN GRAPHITI_HAS_MEMBER_EDGES m ON m.SOURCE_NODE_UUID = c.UUID
+            WHERE {where_clause}
+            """,
+            **where_params,
         )
+        for record in records:
+            record['name_embedding'] = loads_json(record.get('name_embedding'), [])
 
         return [community_node_from_record(r) for r in records]

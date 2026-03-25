@@ -126,6 +126,35 @@ class Node(BaseModel, ABC):
                     uuid=self.uuid,
                 )
 
+            case GraphProvider.ORACLE:
+                for table in [
+                    'GRAPHITI_RELATES_TO_EDGES',
+                    'GRAPHITI_MENTIONS_EDGES',
+                    'GRAPHITI_HAS_MEMBER_EDGES',
+                    'GRAPHITI_HAS_EPISODE_EDGES',
+                    'GRAPHITI_NEXT_EPISODE_EDGES',
+                ]:
+                    await driver.execute_query(
+                        f"""
+                        DELETE FROM {table}
+                        WHERE UUID = $uuid OR SOURCE_NODE_UUID = $uuid OR TARGET_NODE_UUID = $uuid
+                        """,
+                        uuid=self.uuid,
+                    )
+                for table in [
+                    'GRAPHITI_ENTITY_NODES',
+                    'GRAPHITI_EPISODIC_NODES',
+                    'GRAPHITI_COMMUNITY_NODES',
+                    'GRAPHITI_SAGA_NODES',
+                ]:
+                    await driver.execute_query(
+                        f"""
+                        DELETE FROM {table}
+                        WHERE UUID = $uuid
+                        """,
+                        uuid=self.uuid,
+                    )
+
             case GraphProvider.KUZU:
                 for label in ['Episodic', 'Community']:
                     await driver.execute_query(
@@ -220,6 +249,25 @@ class Node(BaseModel, ABC):
                     """,
                     group_id=group_id,
                 )
+            case GraphProvider.ORACLE:
+                for table in [
+                    'GRAPHITI_RELATES_TO_EDGES',
+                    'GRAPHITI_MENTIONS_EDGES',
+                    'GRAPHITI_HAS_MEMBER_EDGES',
+                    'GRAPHITI_HAS_EPISODE_EDGES',
+                    'GRAPHITI_NEXT_EPISODE_EDGES',
+                    'GRAPHITI_ENTITY_NODES',
+                    'GRAPHITI_EPISODIC_NODES',
+                    'GRAPHITI_COMMUNITY_NODES',
+                    'GRAPHITI_SAGA_NODES',
+                ]:
+                    await driver.execute_query(
+                        f"""
+                        DELETE FROM {table}
+                        WHERE GROUP_ID = $group_id
+                        """,
+                        group_id=group_id,
+                    )
             case _:  # FalkorDB, Neptune
                 for label in ['Entity', 'Episodic', 'Community']:
                     await driver.execute_query(
@@ -252,16 +300,35 @@ class Node(BaseModel, ABC):
                         uuids=uuids,
                     )
             case GraphProvider.ORACLE:
-                # Avoid provider-specific transaction batching syntax and issue simple deletes.
-                for label in ['Entity', 'Episodic', 'Community']:
-                    await driver.execute_query(
-                        f"""
-                        MATCH (n:{label})
-                        WHERE n.uuid IN $uuids
-                        DETACH DELETE n
-                        """,
-                        uuids=uuids,
-                    )
+                # Oracle SQL path: delete edge rows first, then node rows.
+                for node_uuid in uuids:
+                    for table in [
+                        'GRAPHITI_RELATES_TO_EDGES',
+                        'GRAPHITI_MENTIONS_EDGES',
+                        'GRAPHITI_HAS_MEMBER_EDGES',
+                        'GRAPHITI_HAS_EPISODE_EDGES',
+                        'GRAPHITI_NEXT_EPISODE_EDGES',
+                    ]:
+                        await driver.execute_query(
+                            f"""
+                            DELETE FROM {table}
+                            WHERE UUID = $uuid OR SOURCE_NODE_UUID = $uuid OR TARGET_NODE_UUID = $uuid
+                            """,
+                            uuid=node_uuid,
+                        )
+                    for table in [
+                        'GRAPHITI_ENTITY_NODES',
+                        'GRAPHITI_EPISODIC_NODES',
+                        'GRAPHITI_COMMUNITY_NODES',
+                        'GRAPHITI_SAGA_NODES',
+                    ]:
+                        await driver.execute_query(
+                            f"""
+                            DELETE FROM {table}
+                            WHERE UUID = $uuid
+                            """,
+                            uuid=node_uuid,
+                        )
             case GraphProvider.KUZU:
                 for label in ['Episodic', 'Community']:
                     await driver.execute_query(
