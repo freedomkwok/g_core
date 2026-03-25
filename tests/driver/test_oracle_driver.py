@@ -105,6 +105,16 @@ class _FakeOracleDb:
         return self._pool
 
 
+class _SyncPoolFactoryOracleDb:
+    def __init__(self, connection: _FakeConnection):
+        self._pool = _FakePool(connection)
+        self.create_pool_async_calls: list[dict] = []
+
+    def create_pool_async(self, **kwargs):
+        self.create_pool_async_calls.append(kwargs)
+        return self._pool
+
+
 class _FailingOracleDb:
     async def create_pool_async(self, **kwargs):
         raise RuntimeError('connect failed')
@@ -175,6 +185,27 @@ async def test_execute_query_uses_oracledb_when_no_query_runner(monkeypatch):
 
     await driver.close()
     assert fake_oracledb._pool.closed
+
+
+@pytest.mark.asyncio
+async def test_execute_query_supports_non_awaitable_pool_factory(monkeypatch):
+    fake_cursor = _FakeCursor()
+    fake_connection = _FakeConnection(fake_cursor)
+    fake_oracledb = _SyncPoolFactoryOracleDb(fake_connection)
+    monkeypatch.setattr(oracle_driver_module, 'oracledb', fake_oracledb)
+
+    driver = OracleDriver(uri='dbhost:1521/service_name', user='scott', password='tiger')
+    records, keys, summary = await driver.execute_query(
+        'SELECT $uuid AS uuid FROM dual',
+        uuid='abc',
+    )
+
+    assert fake_oracledb.create_pool_async_calls == [
+        {'user': 'scott', 'password': 'tiger', 'dsn': 'dbhost:1521/service_name'}
+    ]
+    assert records == [{'uuid': 'abc'}]
+    assert keys == ['uuid']
+    assert summary is None
 
 
 @pytest.mark.asyncio

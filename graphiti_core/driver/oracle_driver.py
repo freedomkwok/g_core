@@ -187,7 +187,7 @@ class OracleDriver(GraphDriver):
 
         self._user = configured_user
         self._password = configured_password
-        self.client: Any = None
+        self.pool: Any = None
         self._connection_lock = asyncio.Lock()
 
         if self._query_runner is None:
@@ -263,6 +263,15 @@ class OracleDriver(GraphDriver):
     def graph_ops(self) -> GraphMaintenanceOperations:
         return self._graph_ops
 
+    @property
+    def client(self) -> Any:
+        """Backward-compatible alias for the native Oracle pool."""
+        return self.pool
+
+    @client.setter
+    def client(self, value: Any) -> None:
+        self.pool = value
+
     async def execute_query(self, cypher_query_: str, **kwargs: Any):
         params = kwargs.pop('params', None)
         if params is None:
@@ -288,7 +297,7 @@ class OracleDriver(GraphDriver):
         return await self._execute_oracledb_query(cypher_query_, params)
 
     async def _ensure_pool(self):
-        if self.client is None:
+        if self.pool is None:
             if self._query_runner is not None:
                 raise ValueError('Oracle native client is not available in query_runner mode.')
 
@@ -306,15 +315,20 @@ class OracleDriver(GraphDriver):
                 )
 
             async with self._connection_lock:
-                if self.client is None:
-                    self.client = await create_pool_async(
+                if self.pool is None:
+                    pool = create_pool_async(
                         user=self._user,
                         password=self._password,
                         dsn=self._dsn,
                         **self._connect_kwargs,
                     )
+                    # Depending on python-oracledb version, create_pool_async()
+                    # may return a pool directly or an awaitable resolving to one.
+                    if inspect.isawaitable(pool):
+                        pool = await pool
+                    self.pool = pool
 
-        return self.client
+        return self.pool
 
     def _prepare_oracle_query(
         self, query: str, params: dict[str, Any]
@@ -359,9 +373,9 @@ class OracleDriver(GraphDriver):
         return OracleDriverSession(driver=self)
 
     async def close(self) -> None:
-        if self.client is not None:
-            pool = self.client
-            self.client = None
+        if self.pool is not None:
+            pool = self.pool
+            self.pool = None
             close_result = pool.close()
             if inspect.isawaitable(close_result):
                 await close_result
