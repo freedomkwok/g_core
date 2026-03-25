@@ -17,6 +17,7 @@ limitations under the License.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -128,13 +129,13 @@ class OracleDriver(GraphDriver):
 
     This driver supports two execution modes:
       1) Injected query runner (`query_runner`) for custom Oracle graph APIs/translators.
-      2) Native `oracledb` execution using `uri`, `user`, `password` or env vars.
+      2) Native `oracledb` execution using `uri`/`dsn`, `user`, `password` or env vars.
 
     Notes
     -----
     - Graphiti emits Cypher-like queries. For native `oracledb` mode, provide
       `query_transform` if your backend needs SQL/PGQL translation.
-    - Native mode uses `oracledb.connect_async()` and async cursor execution.
+    - Native mode uses `oracledb.create_pool_async()` and async cursor execution.
     """
 
     provider = GraphProvider.ORACLE
@@ -159,7 +160,10 @@ class OracleDriver(GraphDriver):
         self._query_transform = query_transform
         self._database = database
         self._supports_index_management = supports_index_management
-        self._connect_kwargs = connect_kwargs or {}
+        self._connect_kwargs = dict(connect_kwargs or {})
+        config_dir = os.getenv('ORACLE_CONFIG_DIR')
+        if config_dir and 'config_dir' not in self._connect_kwargs:
+            self._connect_kwargs['config_dir'] = config_dir
 
         configured_uri = uri or os.getenv('ORACLE_URI')
         configured_dsn = dsn or os.getenv('ORACLE_DSN')
@@ -283,7 +287,7 @@ class OracleDriver(GraphDriver):
 
         return await self._execute_oracledb_query(cypher_query_, params)
 
-    async def _ensure_connection(self):
+    async def _ensure_pool(self):
         if self.client is None:
             if self._query_runner is not None:
                 raise ValueError('Oracle native client is not available in query_runner mode.')
@@ -294,23 +298,21 @@ class OracleDriver(GraphDriver):
                     'Install it with: pip install graphiti-core[oracle]'
                 )
 
-            connect_async = getattr(oracledb, 'connect_async', None)
-            if connect_async is None:
+            create_pool_async = getattr(oracledb, 'create_pool_async', None)
+            if create_pool_async is None:
                 raise AttributeError(
-                    'Installed oracledb package does not expose connect_async(). '
+                    'Installed oracledb package does not expose create_pool_async(). '
                     'Use a newer python-oracledb version in Thin mode.'
                 )
 
             async with self._connection_lock:
                 if self.client is None:
-                    self.client = await connect_async(
+                    self.client = await create_pool_async(
                         user=self._user,
                         password=self._password,
                         dsn=self._dsn,
                         **self._connect_kwargs,
                     )
-                    # Autocommit keeps behavior close to other drivers.
-                    self.client.autocommit = True
 
         return self.client
 
@@ -339,11 +341,13 @@ class OracleDriver(GraphDriver):
             return records, header, None
 
     async def _execute_oracledb_query(self, query: str, params: dict[str, Any]):
-        connection = await self._ensure_connection()
+        pool = await self._ensure_pool()
         oracle_query, oracle_params = self._prepare_oracle_query(query, params)
 
         try:
-            async with self._connection_lock:
+            async with pool.acquire() as connection:
+                # Keep behavior close to other Graphiti drivers.
+                connection.autocommit = True
                 return await self._run_query_async(connection, oracle_query, oracle_params)
         except Exception as exc:
             logger.error(f'Error executing Oracle query: {exc}\n{oracle_query}\n{oracle_params}')
@@ -356,9 +360,11 @@ class OracleDriver(GraphDriver):
 
     async def close(self) -> None:
         if self.client is not None:
-            connection = self.client
+            pool = self.client
             self.client = None
-            await connection.close()
+            close_result = pool.close()
+            if inspect.isawaitable(close_result):
+                await close_result
         if self._close_runner is not None:
             await self._close_runner()
 

@@ -70,18 +70,43 @@ class _FakeConnection:
         self.closed = True
 
 
-class _FakeOracleDb:
+class _FakeAcquireContext:
+    def __init__(self, pool: '_FakePool'):
+        self._pool = pool
+
+    async def __aenter__(self):
+        self._pool.acquire_calls += 1
+        return self._pool._connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakePool:
     def __init__(self, connection: _FakeConnection):
         self._connection = connection
-        self.connect_async_calls: list[dict] = []
+        self.acquire_calls = 0
+        self.closed = False
 
-    async def connect_async(self, **kwargs):
-        self.connect_async_calls.append(kwargs)
-        return self._connection
+    def acquire(self):
+        return _FakeAcquireContext(self)
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeOracleDb:
+    def __init__(self, connection: _FakeConnection):
+        self._pool = _FakePool(connection)
+        self.create_pool_async_calls: list[dict] = []
+
+    async def create_pool_async(self, **kwargs):
+        self.create_pool_async_calls.append(kwargs)
+        return self._pool
 
 
 class _FailingOracleDb:
-    async def connect_async(self, **kwargs):
+    async def create_pool_async(self, **kwargs):
         raise RuntimeError('connect failed')
 
 
@@ -133,14 +158,14 @@ async def test_execute_query_uses_oracledb_when_no_query_runner(monkeypatch):
     monkeypatch.setattr(oracle_driver_module, 'oracledb', fake_oracledb)
 
     driver = OracleDriver(uri='dbhost:1521/service_name', user='scott', password='tiger')
-    assert fake_oracledb.connect_async_calls == []
+    assert fake_oracledb.create_pool_async_calls == []
 
     records, keys, summary = await driver.execute_query(
         'SELECT $uuid AS uuid FROM dual',
         uuid='abc',
     )
 
-    assert fake_oracledb.connect_async_calls == [
+    assert fake_oracledb.create_pool_async_calls == [
         {'user': 'scott', 'password': 'tiger', 'dsn': 'dbhost:1521/service_name'}
     ]
     assert fake_cursor.executed == [('SELECT :uuid AS uuid FROM dual', {'uuid': 'abc'})]
@@ -149,7 +174,7 @@ async def test_execute_query_uses_oracledb_when_no_query_runner(monkeypatch):
     assert summary is None
 
     await driver.close()
-    assert fake_connection.closed
+    assert fake_oracledb._pool.closed
 
 
 @pytest.mark.asyncio
@@ -164,7 +189,8 @@ async def test_execute_query_reuses_single_native_connection(monkeypatch):
     await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='abc')
     await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='def')
 
-    assert len(fake_oracledb.connect_async_calls) == 1
+    assert len(fake_oracledb.create_pool_async_calls) == 1
+    assert fake_oracledb._pool.acquire_calls == 2
     assert len(fake_cursor.executed) == 2
 
 
@@ -180,7 +206,7 @@ async def test_execute_query_reconnects_after_close(monkeypatch):
     await driver.close()
     await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='def')
 
-    assert len(fake_oracledb.connect_async_calls) == 2
+    assert len(fake_oracledb.create_pool_async_calls) == 2
 
 
 @pytest.mark.asyncio
@@ -196,7 +222,7 @@ async def test_execute_query_uses_env_credentials_and_parsed_uri(monkeypatch):
     driver = OracleDriver()
     await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='abc')
 
-    assert fake_oracledb.connect_async_calls == [
+    assert fake_oracledb.create_pool_async_calls == [
         {'user': 'env_user', 'password': 'env_pass', 'dsn': 'envhost:1522/envservice'}
     ]
 
@@ -217,7 +243,7 @@ async def test_execute_query_uses_explicit_dsn(monkeypatch):
     driver = OracleDriver(dsn=dsn, user='scott', password='tiger')
     await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='abc')
 
-    assert fake_oracledb.connect_async_calls == [{'user': 'scott', 'password': 'tiger', 'dsn': dsn}]
+    assert fake_oracledb.create_pool_async_calls == [{'user': 'scott', 'password': 'tiger', 'dsn': dsn}]
 
 
 @pytest.mark.asyncio
@@ -234,13 +260,13 @@ async def test_execute_query_uses_oracle_dsn_env(monkeypatch):
     driver = OracleDriver()
     await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='abc')
 
-    assert fake_oracledb.connect_async_calls == [
+    assert fake_oracledb.create_pool_async_calls == [
         {'user': 'env_user', 'password': 'env_pass', 'dsn': 'envhost:1522/envservice'}
     ]
 
 
 @pytest.mark.asyncio
-async def test_execute_query_passes_connect_kwargs_to_connect_async(monkeypatch):
+async def test_execute_query_passes_connect_kwargs_to_pool_creation(monkeypatch):
     fake_cursor = _FakeCursor()
     fake_connection = _FakeConnection(fake_cursor)
     fake_oracledb = _FakeOracleDb(fake_connection)
@@ -254,13 +280,34 @@ async def test_execute_query_passes_connect_kwargs_to_connect_async(monkeypatch)
     )
     await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='abc')
 
-    assert fake_oracledb.connect_async_calls == [
+    assert fake_oracledb.create_pool_async_calls == [
         {'user': 'scott', 'password': 'tiger', 'dsn': 'dbhost:1521/service_name', 'events': True}
     ]
 
 
 @pytest.mark.asyncio
-async def test_execute_query_surfaces_connect_async_errors(monkeypatch):
+async def test_execute_query_uses_oracle_config_dir_env_when_missing_from_kwargs(monkeypatch):
+    fake_cursor = _FakeCursor()
+    fake_connection = _FakeConnection(fake_cursor)
+    fake_oracledb = _FakeOracleDb(fake_connection)
+    monkeypatch.setattr(oracle_driver_module, 'oracledb', fake_oracledb)
+    monkeypatch.setenv('ORACLE_CONFIG_DIR', '/opt/oracle/wallet')
+
+    driver = OracleDriver(uri='dbhost:1521/service_name', user='scott', password='tiger')
+    await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='abc')
+
+    assert fake_oracledb.create_pool_async_calls == [
+        {
+            'user': 'scott',
+            'password': 'tiger',
+            'dsn': 'dbhost:1521/service_name',
+            'config_dir': '/opt/oracle/wallet',
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_query_surfaces_pool_creation_errors(monkeypatch):
     monkeypatch.setattr(oracle_driver_module, 'oracledb', _FailingOracleDb())
     driver = OracleDriver(uri='dbhost:1521/service_name', user='scott', password='tiger')
 
