@@ -202,6 +202,44 @@ async def test_execute_query_uses_env_credentials_and_parsed_uri(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_query_uses_explicit_dsn(monkeypatch):
+    fake_cursor = _FakeCursor()
+    fake_connection = _FakeConnection(fake_cursor)
+    fake_oracledb = _FakeOracleDb(fake_connection)
+    monkeypatch.setattr(oracle_driver_module, 'oracledb', fake_oracledb)
+
+    dsn = (
+        '(DESCRIPTION=(RETRY_COUNT=20)(RETRY_DELAY=3)'
+        '(ADDRESS=(PROTOCOL=TCPS)(HOST=myhost.oraclecloud.com)(PORT=1521))'
+        '(CONNECT_DATA=(SERVICE_NAME=myservice.oraclecloud.com))'
+        '(SECURITY=(SSL_SERVER_DN_MATCH=NO)))'
+    )
+    driver = OracleDriver(dsn=dsn, user='scott', password='tiger')
+    await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='abc')
+
+    assert fake_oracledb.connect_async_calls == [{'user': 'scott', 'password': 'tiger', 'dsn': dsn}]
+
+
+@pytest.mark.asyncio
+async def test_execute_query_uses_oracle_dsn_env(monkeypatch):
+    fake_cursor = _FakeCursor()
+    fake_connection = _FakeConnection(fake_cursor)
+    fake_oracledb = _FakeOracleDb(fake_connection)
+    monkeypatch.setattr(oracle_driver_module, 'oracledb', fake_oracledb)
+    monkeypatch.delenv('ORACLE_URI', raising=False)
+    monkeypatch.setenv('ORACLE_DSN', 'envhost:1522/envservice')
+    monkeypatch.setenv('ORACLE_USER', 'env_user')
+    monkeypatch.setenv('ORACLE_PASSWORD', 'env_pass')
+
+    driver = OracleDriver()
+    await driver.execute_query('SELECT $uuid AS uuid FROM dual', uuid='abc')
+
+    assert fake_oracledb.connect_async_calls == [
+        {'user': 'env_user', 'password': 'env_pass', 'dsn': 'envhost:1522/envservice'}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_execute_query_passes_connect_kwargs_to_connect_async(monkeypatch):
     fake_cursor = _FakeCursor()
     fake_connection = _FakeConnection(fake_cursor)
@@ -233,6 +271,7 @@ async def test_execute_query_surfaces_connect_async_errors(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_query_without_runner_or_credentials_raises(monkeypatch):
     monkeypatch.delenv('ORACLE_URI', raising=False)
+    monkeypatch.delenv('ORACLE_DSN', raising=False)
     monkeypatch.delenv('ORACLE_USER', raising=False)
     monkeypatch.delenv('ORACLE_PASSWORD', raising=False)
 

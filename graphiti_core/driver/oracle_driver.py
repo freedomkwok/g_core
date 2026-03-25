@@ -145,6 +145,7 @@ class OracleDriver(GraphDriver):
         query_runner: QueryRunner | None = None,
         close_runner: CloseRunner | None = None,
         uri: str | None = None,
+        dsn: str | None = None,
         user: str | None = None,
         password: str | None = None,
         database: str = 'default',
@@ -161,16 +162,24 @@ class OracleDriver(GraphDriver):
         self._connect_kwargs = connect_kwargs or {}
 
         configured_uri = uri or os.getenv('ORACLE_URI')
+        configured_dsn = dsn or os.getenv('ORACLE_DSN')
         configured_user = user or os.getenv('ORACLE_USER')
         configured_password = password or os.getenv('ORACLE_PASSWORD')
 
         self._uri = configured_uri
+        self._configured_dsn = configured_dsn
         self._dsn: str | None = None
+        uri_user: str | None = None
+        uri_password: str | None = None
         if configured_uri:
-            dsn, uri_user, uri_password = _parse_oracle_uri(configured_uri)
-            self._dsn = dsn
-            configured_user = configured_user or uri_user
-            configured_password = configured_password or uri_password
+            parsed_dsn, uri_user, uri_password = _parse_oracle_uri(configured_uri)
+            self._dsn = parsed_dsn
+
+        if configured_dsn:
+            self._dsn = configured_dsn
+
+        configured_user = configured_user or uri_user
+        configured_password = configured_password or uri_password
 
         self._user = configured_user
         self._password = configured_password
@@ -181,7 +190,7 @@ class OracleDriver(GraphDriver):
             if self._dsn is None or self._user is None or self._password is None:
                 raise ValueError(
                     'OracleDriver requires either a query_runner or Oracle credentials '
-                    '(uri, user, password / ORACLE_URI, ORACLE_USER, ORACLE_PASSWORD).'
+                    '(uri/dsn, user, password / ORACLE_URI, ORACLE_DSN, ORACLE_USER, ORACLE_PASSWORD).'
                 )
 
             if oracledb is None:
@@ -378,6 +387,7 @@ class OracleDriver(GraphDriver):
             query_runner=self._query_runner,
             close_runner=self._close_runner,
             uri=self._uri,
+            dsn=self._configured_dsn,
             user=self._user,
             password=self._password,
             database=database,
