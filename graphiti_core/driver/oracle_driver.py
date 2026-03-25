@@ -150,7 +150,7 @@ class OracleDriver(GraphDriver):
         user: str | None = None,
         password: str | None = None,
         database: str = 'default',
-        supports_index_management: bool = False,
+        supports_index_management: bool = True,
         connect_kwargs: dict[str, Any] | None = None,
         query_transform: QueryTransform | None = None,
     ):
@@ -392,6 +392,17 @@ class OracleDriver(GraphDriver):
 
     async def build_indices_and_constraints(self, delete_existing: bool = False):
         if not self._supports_index_management:
+            return
+
+        # Oracle Graph index management is backend-specific. Graphiti's built-in index
+        # DDL is Cypher/Neo4j-oriented, so raw native mode should not execute it.
+        # Use query_runner/query_transform for Oracle-specific DDL translation.
+        if self._query_runner is None and self._query_transform is None:
+            logger.info(
+                'Skipping Oracle index creation in native mode because Graphiti index DDL is '
+                'Neo4j/Cypher-oriented. Provide query_runner or query_transform for Oracle '
+                'index translation.'
+            )
             return
 
         if delete_existing:

@@ -409,9 +409,32 @@ async def test_build_indices_noop_when_disabled():
 
 
 @pytest.mark.asyncio
+async def test_build_indices_skips_native_mode_without_transform(monkeypatch):
+    fake_cursor = _FakeCursor()
+    fake_connection = _FakeConnection(fake_cursor)
+    fake_oracledb = _FakeOracleDb(fake_connection)
+    monkeypatch.setattr(oracle_driver_module, 'oracledb', fake_oracledb)
+
+    driver = OracleDriver(uri='dbhost:1521/service_name', user='scott', password='tiger')
+    await driver.build_indices_and_constraints()
+
+    assert fake_oracledb.create_pool_async_calls == []
+
+
+@pytest.mark.asyncio
 async def test_build_indices_runs_queries_when_enabled():
     query_runner = AsyncMock(return_value=[])
     driver = OracleDriver(query_runner=query_runner, supports_index_management=True)
+
+    await driver.build_indices_and_constraints()
+
+    assert query_runner.await_count > 0
+
+
+@pytest.mark.asyncio
+async def test_build_indices_runs_by_default_for_query_runner():
+    query_runner = AsyncMock(return_value=[])
+    driver = OracleDriver(query_runner=query_runner)
 
     await driver.build_indices_and_constraints()
 
