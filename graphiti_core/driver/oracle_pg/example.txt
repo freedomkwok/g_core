@@ -1,0 +1,16 @@
+BEGIN
+  CTX_DDL.CREATE_PREFERENCE('entity_mcds', 'MULTI_COLUMN_DATASTORE');
+  CTX_DDL.SET_ATTRIBUTE('entity_mcds', 'COLUMNS', 'name,summary');
+END;
+/
+
+CREATE INDEX entity_name_summary_ctx
+ON entity_nodes(name)
+INDEXTYPE IS CTXSYS.CONTEXT
+PARAMETERS ('DATASTORE entity_mcds');
+
+SELECT uuid, name, SCORE(1) AS score
+FROM entity_nodes
+WHERE group_id = :group_id
+  AND CONTAINS(name, :query, 1) > 0
+ORDER BY SCORE(1) DESC;

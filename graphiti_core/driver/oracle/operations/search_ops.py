@@ -17,7 +17,7 @@ limitations under the License.
 import json
 from typing import Any
 
-from graphiti_core.driver.neo4j.operations.search_ops import Neo4jSearchOperations
+from graphiti_core.driver.operations.search_ops import SearchOperations
 from graphiti_core.driver.oracle.rdf_utils import (
     execute_sem_match_join_select,
     execute_sem_match_select,
@@ -58,7 +58,7 @@ def _score_to_float(raw_score: Any) -> float:
     return 0.0
 
 
-class OracleSearchOperations(Neo4jSearchOperations):
+class OracleSearchOperations(SearchOperations):
     """Oracle search operations with RDF-aware rerankers."""
 
     async def node_fulltext_search(
@@ -70,7 +70,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         limit: int = 10,
     ) -> list[EntityNode]:
         if not rdf_mode_for_executor(executor):
-            return await super().node_fulltext_search(executor, query, search_filter, group_ids, limit)
+            return []
 
         search_text = query.strip()
         if search_text == '':
@@ -150,10 +150,6 @@ class OracleSearchOperations(Neo4jSearchOperations):
         limit: int = 10,
         min_score: float = 0.6,
     ) -> list[EntityNode]:
-        if not rdf_mode_for_executor(executor):
-            return await super().node_similarity_search(
-                executor, search_vector, search_filter, group_ids, limit, min_score
-            )
 
         if not search_vector:
             return []
@@ -255,9 +251,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EntityNode]:
-        return await super().node_bfs_search(
-            executor, origin_uuids, search_filter, max_depth, group_ids, limit
-        )
+        return []
 
     async def edge_fulltext_search(
         self,
@@ -267,7 +261,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EntityEdge]:
-        return await super().edge_fulltext_search(executor, query, search_filter, group_ids, limit)
+        return []
 
     async def edge_similarity_search(
         self,
@@ -280,16 +274,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         limit: int = 10,
         min_score: float = 0.6,
     ) -> list[EntityEdge]:
-        return await super().edge_similarity_search(
-            executor,
-            search_vector,
-            source_node_uuid,
-            target_node_uuid,
-            search_filter,
-            group_ids,
-            limit,
-            min_score,
-        )
+        return []
 
     async def edge_bfs_search(
         self,
@@ -300,9 +285,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EntityEdge]:
-        return await super().edge_bfs_search(
-            executor, origin_uuids, max_depth, search_filter, group_ids, limit
-        )
+        return []
 
     async def episode_fulltext_search(
         self,
@@ -312,7 +295,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EpisodicNode]:
-        return await super().episode_fulltext_search(executor, query, search_filter, group_ids, limit)
+        return []
 
     async def community_fulltext_search(
         self,
@@ -321,7 +304,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[CommunityNode]:
-        return await super().community_fulltext_search(executor, query, group_ids, limit)
+        return []
 
     async def community_similarity_search(
         self,
@@ -331,9 +314,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         limit: int = 10,
         min_score: float = 0.6,
     ) -> list[CommunityNode]:
-        return await super().community_similarity_search(
-            executor, search_vector, group_ids, limit, min_score
-        )
+        return []
 
     async def node_distance_reranker(
         self,
@@ -342,7 +323,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         center_node_uuid: str,
         min_score: float = 0,
     ) -> list[EntityNode]:
-        return await super().node_distance_reranker(executor, node_uuids, center_node_uuid, min_score)
+        return []
 
     async def episode_mentions_reranker(
         self,
@@ -351,7 +332,7 @@ class OracleSearchOperations(Neo4jSearchOperations):
         min_score: float = 0,
     ) -> list[EntityNode]:
         if not rdf_mode_for_executor(executor):
-            return await super().episode_mentions_reranker(executor, node_uuids, min_score)
+            return []
 
         if not node_uuids:
             return []
@@ -415,10 +396,10 @@ class OracleSearchOperations(Neo4jSearchOperations):
         return [node_map[uuid] for uuid in reranked_uuids if uuid in node_map]
 
     def build_node_search_filters(self, search_filters: SearchFilters) -> Any:
-        return super().build_node_search_filters(search_filters)
+        return None
 
     def build_edge_search_filters(self, search_filters: SearchFilters) -> Any:
-        return super().build_edge_search_filters(search_filters)
+        return None
 
     def build_fulltext_query(
         self,
@@ -426,4 +407,4 @@ class OracleSearchOperations(Neo4jSearchOperations):
         group_ids: list[str] | None = None,
         max_query_length: int = 8000,
     ) -> str:
-        return super().build_fulltext_query(query, group_ids, max_query_length)
+        return ''

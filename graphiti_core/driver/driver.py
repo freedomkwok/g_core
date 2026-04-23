@@ -96,6 +96,8 @@ class GraphDriver(QueryExecutor, ABC):
     )
     _database: str
     default_group_id: str = ''
+    # Optional cap for helpers.semaphore_gather when code reads concurrency from the driver.
+    max_coroutines: int | None = None
     # Legacy interfaces (kept for backwards compatibility during Phase 1)
     search_interface: SearchInterface | None = None
     graph_operations_interface: GraphOperationsInterface | None = None

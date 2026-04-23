@@ -24,8 +24,12 @@ from graphiti_core.driver.record_parsers import (
     episodic_node_from_record,
 )
 from graphiti_core.edges import EntityEdge
+from graphiti_core.helpers import validate_group_ids
+from graphiti_core.utils.keyword_extractor import build_fulltext_terms_from_query
 from graphiti_core.nodes import CommunityNode, EntityNode, EpisodicNode
 from graphiti_core.search.search_filters import SearchFilters
+
+MAX_QUERY_LENGTH = 128
 
 
 def _normalize_entity_node(record: dict[str, Any]) -> dict[str, Any]:
@@ -82,6 +86,9 @@ class OraclePGSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EntityNode]:
+        fulltext_query = self.build_fulltext_query(query, group_ids, MAX_QUERY_LENGTH)
+        if fulltext_query == '':
+            return []
         table = get_table_name(executor, 'entity_nodes')
         group_clause = f' AND group_id IN {sql_in_list(group_ids)}' if group_ids else ''
         label_clause = _node_label_sql(search_filter)
@@ -96,18 +103,14 @@ class OraclePGSearchOperations(SearchOperations):
               summary,
               labels,
               attributes,
-              (
-                CASE WHEN INSTR(LOWER(name), LOWER($search_query)) > 0 THEN 1 ELSE 0 END
-                + CASE WHEN INSTR(LOWER(summary), LOWER($search_query)) > 0 THEN 1 ELSE 0 END
-              ) AS score
+              SCORE(1) AS score
             FROM {table}
-            WHERE (LOWER(name) LIKE '%' || LOWER($search_query) || '%' OR LOWER(summary) LIKE '%' || LOWER($search_query) || '%')
+            WHERE CONTAINS(name, '{fulltext_query}', 1) > 0
             {group_clause}
             {label_clause}
             ORDER BY score DESC, uuid DESC
             FETCH FIRST {int(limit)} ROWS ONLY
             """,
-            search_query=query,
         )
         return [entity_node_from_record(_normalize_entity_node(record)) for record in records]
 
@@ -209,6 +212,9 @@ class OraclePGSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EntityEdge]:
+        fulltext_query = self.build_fulltext_query(query, group_ids, MAX_QUERY_LENGTH)
+        if fulltext_query == '':
+            return []
         table = get_table_name(executor, 'entity_edges')
         group_clause = f' AND group_id IN {sql_in_list(group_ids)}' if group_ids else ''
         edge_type_clause = _edge_type_sql(search_filter)
@@ -230,15 +236,16 @@ class OraclePGSearchOperations(SearchOperations):
               valid_at,
               invalid_at,
               expired_at,
-              attributes
+              attributes,
+              SCORE(1) AS score
             FROM {table}
-            WHERE (LOWER(name) LIKE '%' || LOWER($search_query) || '%' OR LOWER(fact_text) LIKE '%' || LOWER($search_query) || '%')
+            WHERE CONTAINS(name, '{fulltext_query}', 1) > 0
             {group_clause}
             {edge_type_clause}
             {uuid_clause}
+            ORDER BY score DESC, uuid DESC
             FETCH FIRST {int(limit)} ROWS ONLY
             """,
-            search_query=query,
         )
         return [entity_edge_from_record(_normalize_entity_edge(record)) for record in records]
 
@@ -347,6 +354,9 @@ class OraclePGSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EpisodicNode]:
+        fulltext_query = self.build_fulltext_query(query, group_ids, MAX_QUERY_LENGTH)
+        if fulltext_query == '':
+            return []
         table = get_table_name(executor, 'episodic_nodes')
         group_clause = f' AND group_id IN {sql_in_list(group_ids)}' if group_ids else ''
         records = await run_query(
@@ -361,15 +371,14 @@ class OraclePGSearchOperations(SearchOperations):
               content,
               entity_edges,
               created_at,
-              valid_at
+              valid_at,
+              SCORE(1) AS score
             FROM {table}
-            WHERE (LOWER(name) LIKE '%' || LOWER($search_query) || '%'
-               OR LOWER(content) LIKE '%' || LOWER($search_query) || '%'
-               OR LOWER(source_description) LIKE '%' || LOWER($search_query) || '%')
+            WHERE CONTAINS(content, '{fulltext_query}', 1) > 0
             {group_clause}
+            ORDER BY score DESC, uuid DESC
             FETCH FIRST {int(limit)} ROWS ONLY
             """,
-            search_query=query,
         )
         return [episodic_node_from_record(_normalize_episode(record)) for record in records]
 
@@ -380,19 +389,27 @@ class OraclePGSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[CommunityNode]:
+        fulltext_query = self.build_fulltext_query(query, group_ids, MAX_QUERY_LENGTH)
+        if fulltext_query == '':
+            return []
         table = get_table_name(executor, 'community_nodes')
         group_clause = f' AND group_id IN {sql_in_list(group_ids)}' if group_ids else ''
         records = await run_query(
             executor,
             f"""
-            SELECT uuid, group_id, name, summary, created_at
+            SELECT
+              uuid,
+              group_id,
+              name,
+              summary,
+              created_at,
+              SCORE(1) AS score
             FROM {table}
-            WHERE (LOWER(name) LIKE '%' || LOWER($search_query) || '%'
-               OR LOWER(summary) LIKE '%' || LOWER($search_query) || '%')
+            WHERE CONTAINS(name, '{fulltext_query}', 1) > 0
             {group_clause}
+            ORDER BY score DESC, uuid DESC
             FETCH FIRST {int(limit)} ROWS ONLY
             """,
-            search_query=query,
         )
         return [community_node_from_record(_normalize_community(record)) for record in records]
 
@@ -525,10 +542,20 @@ class OraclePGSearchOperations(SearchOperations):
         self,
         query: str,
         group_ids: list[str] | None = None,
-        max_query_length: int = 8000,
+        max_query_length: int = 128,
     ) -> str:
-        trimmed = query.strip()
-        return trimmed[:max_query_length]
+        """Build Oracle ``CONTAINS`` query text. Partitioning uses SQL ``group_id IN (...)``, not Text sections.
+
+        ``max_query_length`` is kept for API compatibility with callers; term length is bounded in
+        :func:`~graphiti_core.utils.keyword_extractor.build_fulltext_terms_from_query`.
+        """
+        validate_group_ids(group_ids)
+
+        lucene_query = build_fulltext_terms_from_query(query)
+        if not lucene_query.strip():
+            return ''
+
+        return '(' + lucene_query + ')'
 
     async def _get_nodes_by_ids(
         self,

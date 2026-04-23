@@ -195,8 +195,7 @@ def get_table_ddl_blocks(graph_id: str) -> list[str]:
           CONTENT CLOB,
           ENTITY_EDGES CLOB,
           CREATED_AT TIMESTAMP,
-          VALID_AT TIMESTAMP,
-          CONTENT_EMBEDDING VECTOR
+          VALID_AT TIMESTAMP
         )
         """,
         f"""
@@ -304,8 +303,7 @@ def get_property_graph_create_block(graph_id: str) -> str:
               KEY (uuid)
               LABEL Episodic
               PROPERTIES (
-                uuid, group_id, name, source, source_description, content, entity_edges,
-                created_at, valid_at, content_embedding
+                uuid, group_id, name, source, source_description, content, entity_edges, created_at, valid_at
               ),
             {community_nodes}
               KEY (uuid)

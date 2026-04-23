@@ -166,6 +166,16 @@ async def extract_edges(
             )
             continue
 
+        # Drop self-edges where source and target resolve to the same node
+        source_node = name_to_node[source_name]
+        target_node = name_to_node[target_name]
+        if source_node.uuid == target_node.uuid:
+            logger.info(
+                'Dropping self-edge for node %s (source and target resolve to same node)',
+                source_node.uuid,
+            )
+            continue
+
         edges_data.append(edge_data)
 
     end = time()
@@ -223,6 +233,7 @@ async def extract_edges(
             created_at=utc_now(),
             valid_at=valid_at_datetime,
             invalid_at=invalid_at_datetime,
+            reference_time=episode.valid_at,
         )
         edges.append(edge)
         logger.debug(
@@ -241,6 +252,7 @@ async def resolve_extracted_edges(
     entities: list[EntityNode],
     edge_types: dict[str, type[BaseModel]],
     edge_type_map: dict[tuple[str, str], list[str]],
+    existing_edges_override: list[EntityEdge] | None = None,
 ) -> tuple[list[EntityEdge], list[EntityEdge], list[EntityEdge]]:
     """Resolve extracted edges against existing graph context.
 
@@ -271,14 +283,36 @@ async def resolve_extracted_edges(
     driver = clients.driver
     llm_client = clients.llm_client
     embedder = clients.embedder
+    gather_limit = driver.max_coroutines
     await create_entity_edge_embeddings(embedder, extracted_edges)
 
     valid_edges_list: list[list[EntityEdge]] = await semaphore_gather(
         *[
             EntityEdge.get_between_nodes(driver, edge.source_node_uuid, edge.target_node_uuid)
             for edge in extracted_edges
-        ]
+        ],
+        max_coroutines=gather_limit,
     )
+
+    # Merge override edges (e.g. from the recent Redis dedup cache) into
+    # the per-extracted-edge candidate lists so that recently resolved edges
+    # that are not yet visible in the graph-service indexes are still
+    # considered during deduplication.
+    if existing_edges_override:
+        override_by_pair: dict[tuple[str, str], list[EntityEdge]] = {}
+        for oe in existing_edges_override:
+            key = (oe.source_node_uuid, oe.target_node_uuid)
+            override_by_pair.setdefault(key, []).append(oe)
+
+        for i, extracted_edge in enumerate(extracted_edges):
+            pair_key = (extracted_edge.source_node_uuid, extracted_edge.target_node_uuid)
+            overrides = override_by_pair.get(pair_key, [])
+            if overrides:
+                existing_uuids = {e.uuid for e in valid_edges_list[i]}
+                for oe in overrides:
+                    if oe.uuid not in existing_uuids:
+                        valid_edges_list[i].append(oe)
+                        existing_uuids.add(oe.uuid)
 
     related_edges_results: list[SearchResults] = await semaphore_gather(
         *[
@@ -290,7 +324,8 @@ async def resolve_extracted_edges(
                 search_filter=SearchFilters(edge_uuids=[edge.uuid for edge in valid_edges]),
             )
             for extracted_edge, valid_edges in zip(extracted_edges, valid_edges_list, strict=True)
-        ]
+        ],
+        max_coroutines=gather_limit,
     )
 
     related_edges_lists: list[list[EntityEdge]] = [result.edges for result in related_edges_results]
@@ -305,7 +340,8 @@ async def resolve_extracted_edges(
                 search_filter=SearchFilters(),
             )
             for extracted_edge in extracted_edges
-        ]
+        ],
+        max_coroutines=gather_limit,
     )
 
     # Remove duplicates: if an edge appears in both duplicate candidates and invalidation candidates,
@@ -391,7 +427,8 @@ async def resolve_extracted_edges(
                     edge_types_lst,
                     strict=True,
                 )
-            ]
+            ],
+            max_coroutines=gather_limit,
         )
     )
 
@@ -417,6 +454,7 @@ async def resolve_extracted_edges(
     await semaphore_gather(
         create_entity_edge_embeddings(embedder, resolved_edges),
         create_entity_edge_embeddings(embedder, invalidated_edges),
+        max_coroutines=gather_limit,
     )
 
     return resolved_edges, invalidated_edges, new_edges

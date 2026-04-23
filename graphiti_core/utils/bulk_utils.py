@@ -157,17 +157,33 @@ async def add_nodes_and_edges_bulk_tx(
     embedder: EmbedderClient,
     driver: GraphDriver,
 ):
+    # Keep embedding generation consistent across both ops-backed and raw-query paths.
+    for node in entity_nodes:
+        if node.name_embedding is None:
+            await node.generate_name_embedding(embedder)
+    for edge in entity_edges:
+        if edge.fact_embedding is None:
+            await edge.generate_embedding(embedder)
+
+    if driver.graph_operations_interface:
+        # Operations interfaces expect domain models rather than serialized dict payloads.
+        await driver.graph_operations_interface.episodic_node_save_bulk(
+            None, driver, tx, episodic_nodes
+        )
+        await driver.graph_operations_interface.node_save_bulk(None, driver, tx, entity_nodes)
+        await driver.graph_operations_interface.episodic_edge_save_bulk(
+            None, driver, tx, episodic_edges
+        )
+        await driver.graph_operations_interface.edge_save_bulk(None, driver, tx, entity_edges)
+        return
+
     episodes = [dict(episode) for episode in episodic_nodes]
     for episode in episodes:
         episode['source'] = str(episode['source'].value)
         episode.pop('labels', None)
 
     nodes = []
-
     for node in entity_nodes:
-        if node.name_embedding is None:
-            await node.generate_name_embedding(embedder)
-
         entity_data: dict[str, Any] = {
             'uuid': node.uuid,
             'name': node.name,
@@ -188,8 +204,6 @@ async def add_nodes_and_edges_bulk_tx(
 
     edges = []
     for edge in entity_edges:
-        if edge.fact_embedding is None:
-            await edge.generate_embedding(embedder)
         edge_data: dict[str, Any] = {
             'uuid': edge.uuid,
             'source_node_uuid': edge.source_node_uuid,
@@ -213,34 +227,7 @@ async def add_nodes_and_edges_bulk_tx(
 
         edges.append(edge_data)
 
-    if driver.graph_operations_interface:
-        await driver.graph_operations_interface.episodic_node_save_bulk(None, driver, tx, episodes)
-        await driver.graph_operations_interface.node_save_bulk(None, driver, tx, nodes)
-        await driver.graph_operations_interface.episodic_edge_save_bulk(
-            None, driver, tx, [edge.model_dump() for edge in episodic_edges]
-        )
-        await driver.graph_operations_interface.edge_save_bulk(None, driver, tx, edges)
-
-    elif driver.provider == GraphProvider.ORACLE and getattr(driver, 'rdf_enabled', False):
-        episode_ops = driver.episode_node_ops
-        entity_node_ops = driver.entity_node_ops
-        episodic_edge_ops = driver.episodic_edge_ops
-        entity_edge_ops = driver.entity_edge_ops
-        if (
-            episode_ops is None
-            or entity_node_ops is None
-            or episodic_edge_ops is None
-            or entity_edge_ops is None
-        ):
-            raise ValueError('Oracle driver is missing required operation handlers for RDF bulk writes.')
-
-        rdf_tx = typing.cast(Any, tx)
-        await episode_ops.save_bulk(driver, episodic_nodes, tx=rdf_tx)
-        await entity_node_ops.save_bulk(driver, entity_nodes, tx=rdf_tx)
-        await episodic_edge_ops.save_bulk(driver, episodic_edges, tx=rdf_tx)
-        await entity_edge_ops.save_bulk(driver, entity_edges, tx=rdf_tx)
-
-    elif driver.provider == GraphProvider.KUZU:
+    if driver.provider == GraphProvider.KUZU:
         # FIXME: Kuzu's UNWIND does not currently support STRUCT[] type properly, so we insert the data one by one instead for now.
         episode_query = get_episode_node_save_bulk_query(driver.provider)
         for episode in episodes:

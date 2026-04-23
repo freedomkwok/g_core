@@ -3,8 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from graphiti_core.driver.driver import GraphProvider
-from graphiti_core.edges import EntityEdge, EpisodicEdge
+from graphiti_core.edges import EntityEdge
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 from graphiti_core.utils import bulk_utils
@@ -37,71 +36,6 @@ def _make_clients() -> GraphitiClients:
         cross_encoder=cross_encoder,
         llm_client=llm_client,
     )
-
-
-@pytest.mark.asyncio
-async def test_add_nodes_and_edges_bulk_tx_uses_oracle_ops_in_rdf_mode():
-    tx = MagicMock()
-    tx.run = AsyncMock()
-
-    episode_ops = MagicMock()
-    episode_ops.save_bulk = AsyncMock()
-    entity_node_ops = MagicMock()
-    entity_node_ops.save_bulk = AsyncMock()
-    episodic_edge_ops = MagicMock()
-    episodic_edge_ops.save_bulk = AsyncMock()
-    entity_edge_ops = MagicMock()
-    entity_edge_ops.save_bulk = AsyncMock()
-
-    driver = MagicMock()
-    driver.provider = GraphProvider.ORACLE
-    driver.rdf_enabled = True
-    driver.graph_operations_interface = None
-    driver.episode_node_ops = episode_ops
-    driver.entity_node_ops = entity_node_ops
-    driver.episodic_edge_ops = episodic_edge_ops
-    driver.entity_edge_ops = entity_edge_ops
-
-    episode = _make_episode('oracle-rdf')
-    entity = EntityNode(
-        name='entity-oracle-rdf',
-        group_id=episode.group_id,
-        labels=['Entity'],
-        name_embedding=[0.1, 0.2],
-    )
-    episodic_edge = EpisodicEdge(
-        source_node_uuid=episode.uuid,
-        target_node_uuid=entity.uuid,
-        created_at=utc_now(),
-        group_id=episode.group_id,
-    )
-    entity_edge = EntityEdge(
-        source_node_uuid=entity.uuid,
-        target_node_uuid=entity.uuid,
-        created_at=utc_now(),
-        name='references',
-        fact='entity references itself',
-        fact_embedding=[0.3, 0.4],
-        episodes=[episode.uuid],
-        group_id=episode.group_id,
-    )
-    embedder = MagicMock()
-
-    await bulk_utils.add_nodes_and_edges_bulk_tx(
-        tx=tx,
-        episodic_nodes=[episode],
-        episodic_edges=[episodic_edge],
-        entity_nodes=[entity],
-        entity_edges=[entity_edge],
-        embedder=embedder,
-        driver=driver,
-    )
-
-    episode_ops.save_bulk.assert_awaited_once_with(driver, [episode], tx=tx)
-    entity_node_ops.save_bulk.assert_awaited_once_with(driver, [entity], tx=tx)
-    episodic_edge_ops.save_bulk.assert_awaited_once_with(driver, [episodic_edge], tx=tx)
-    entity_edge_ops.save_bulk.assert_awaited_once_with(driver, [entity_edge], tx=tx)
-    tx.run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

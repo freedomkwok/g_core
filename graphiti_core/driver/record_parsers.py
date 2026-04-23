@@ -95,7 +95,6 @@ def episodic_node_from_record(record: Any) -> EpisodicNode:
 
     return EpisodicNode(
         content=record['content'],
-        content_embedding=record.get('content_embedding'),
         created_at=created_at,
         valid_at=valid_at,
         uuid=record['uuid'],

@@ -56,6 +56,11 @@ def get_range_indices(provider: GraphProvider) -> list[LiteralString]:
         # - RDF mode uses SEM_APIS datatype indexes in OracleDriver.
         # - Native mode requires adapter-managed SQL/DDL translation.
         return []
+        
+    if provider == GraphProvider.ORACLE:
+        # Oracle does not support Neo4j fulltext DDL syntax.
+        # Use Oracle-specific indexing externally or RDF SEM_APIS indexes in RDF mode.
+        return []
 
     return [
         'CREATE INDEX entity_uuid IF NOT EXISTS FOR (n:Entity) ON (n.uuid)',
@@ -133,11 +138,6 @@ def get_fulltext_indices(provider: GraphProvider) -> list[LiteralString]:
             "CALL CREATE_FTS_INDEX('Community', 'community_name', ['name']);",
             "CALL CREATE_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', ['name', 'fact']);",
         ]
-
-    if provider == GraphProvider.ORACLE:
-        # Oracle does not support Neo4j fulltext DDL syntax.
-        # Use Oracle-specific indexing externally or RDF SEM_APIS indexes in RDF mode.
-        return []
 
     return [
         """CREATE FULLTEXT INDEX episode_content IF NOT EXISTS

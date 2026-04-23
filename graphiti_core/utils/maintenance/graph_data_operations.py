@@ -96,17 +96,6 @@ async def retrieve_episodes(
         except NotImplementedError:
             pass
 
-    if driver.provider == GraphProvider.ORACLE and driver.episode_node_ops is not None:
-        episodes = await driver.episode_node_ops.retrieve_episodes(
-            driver,
-            reference_time,
-            last_n,
-            group_ids,
-            source.name if source is not None else None,
-            saga,
-        )
-        return list(reversed(episodes))  # Return in chronological order
-
     # If saga is provided, retrieve episodes from that saga only
     if saga is not None:
         group_id = group_ids[0] if group_ids else None

@@ -61,6 +61,13 @@ EPISODIC_EDGE_RETURN = """
 
 
 def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) -> str:
+    oracle_pg_provider = getattr(GraphProvider, 'ORACLE_PG', None)
+    if oracle_pg_provider is not None and provider == oracle_pg_provider:
+        raise NotImplementedError(
+            'GraphProvider.ORACLE_PG must use OraclePGDriver entity_edge_ops.save(), '
+            'not Cypher query builders.'
+        )
+
     match provider:
         case GraphProvider.FALKORDB:
             return """
@@ -104,6 +111,7 @@ def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) 
                     e.expired_at = $expired_at,
                     e.valid_at = $valid_at,
                     e.invalid_at = $invalid_at,
+                    e.reference_time = $reference_time,
                     e.attributes = $attributes
                 RETURN e.uuid AS uuid
             """
@@ -130,6 +138,13 @@ def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) 
 
 
 def get_entity_edge_save_bulk_query(provider: GraphProvider, has_aoss: bool = False) -> str:
+    oracle_pg_provider = getattr(GraphProvider, 'ORACLE_PG', None)
+    if oracle_pg_provider is not None and provider == oracle_pg_provider:
+        raise NotImplementedError(
+            'GraphProvider.ORACLE_PG must use OraclePGDriver entity_edge_ops.save_bulk(), '
+            'not Cypher query builders.'
+        )
+
     match provider:
         case GraphProvider.FALKORDB:
             return """

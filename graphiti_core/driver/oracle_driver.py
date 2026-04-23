@@ -60,14 +60,20 @@ from graphiti_core.driver.oracle.operations.next_episode_edge_ops import (
 )
 from graphiti_core.driver.oracle.operations.saga_node_ops import OracleSagaNodeOperations
 from graphiti_core.driver.oracle.operations.search_ops import OracleSearchOperations
+from graphiti_core.driver.oracle.graph_queries import (
+    get_fulltext_indices as get_oracle_fulltext_indices,
+    get_range_indices as get_oracle_range_indices,
+)
 from graphiti_core.driver.oracle.rdf_utils import (
     ensure_embedding_table,
     get_rdf_table_name,
     sanitize_oracle_table_base,
     sanitize_rdf_graph_name,
 )
-from graphiti_core.graph_queries import get_fulltext_indices, get_range_indices
 from graphiti_core.helpers import semaphore_gather
+from graphiti_core.driver.search_interface.ops_backed_search_interface import (
+    OpsBackedSearchInterface,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +339,8 @@ class OracleDriver(GraphDriver):
         self._next_episode_edge_ops = OracleNextEpisodeEdgeOperations()
         self._search_ops = OracleSearchOperations()
         self._graph_ops = OracleGraphMaintenanceOperations()
+        self.search_interface = OpsBackedSearchInterface()
+        self.graph_operations_interface = None
 
     # --- Operations properties ---
 
@@ -760,7 +768,7 @@ class OracleDriver(GraphDriver):
         if delete_existing:
             await self.delete_all_indexes()
 
-        index_queries = get_range_indices(self.provider) + get_fulltext_indices(self.provider)
+        index_queries = get_oracle_range_indices(self) + get_oracle_fulltext_indices(self)
         await semaphore_gather(*[self.execute_query(query) for query in index_queries])
 
     def clone(self, database: str) -> OracleDriver:

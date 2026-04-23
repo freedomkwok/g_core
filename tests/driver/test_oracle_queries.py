@@ -70,6 +70,18 @@ def test_oracle_entity_node_bulk_query_avoids_neo4j_vector_procedure():
     assert '<gti:pred:name_embedding>' not in query
 
 
+def test_oracle_pg_entity_node_query_requires_oracle_pg_driver_ops():
+    oracle_pg_provider = getattr(GraphProvider, 'ORACLE_PG', None)
+    if oracle_pg_provider is None:
+        pytest.skip('GraphProvider.ORACLE_PG is unavailable in this runtime')
+
+    with pytest.raises(NotImplementedError, match='OraclePGDriver entity_node_ops.save'):
+        get_entity_node_save_query(oracle_pg_provider, 'Entity:Person')
+
+    with pytest.raises(NotImplementedError, match='OraclePGDriver entity_node_ops.save_bulk'):
+        get_entity_node_save_bulk_query(oracle_pg_provider, [])
+
+
 def test_oracle_community_node_query_avoids_neo4j_vector_procedure():
     query = get_community_node_save_query(GraphProvider.ORACLE)
 
@@ -89,6 +101,18 @@ def test_oracle_entity_edge_bulk_query_avoids_neo4j_vector_procedure():
 
     assert 'db.create.setRelationshipVectorProperty' not in query
     assert 'UNWIND $entity_edges AS edge' in query
+
+
+def test_oracle_pg_entity_edge_query_requires_oracle_pg_driver_ops():
+    oracle_pg_provider = getattr(GraphProvider, 'ORACLE_PG', None)
+    if oracle_pg_provider is None:
+        pytest.skip('GraphProvider.ORACLE_PG is unavailable in this runtime')
+
+    with pytest.raises(NotImplementedError, match='OraclePGDriver entity_edge_ops.save'):
+        get_entity_edge_save_query(oracle_pg_provider)
+
+    with pytest.raises(NotImplementedError, match='OraclePGDriver entity_edge_ops.save_bulk'):
+        get_entity_edge_save_bulk_query(oracle_pg_provider)
 
 
 def test_oracle_community_edge_query_uses_portable_label_filter():

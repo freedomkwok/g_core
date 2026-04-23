@@ -119,12 +119,20 @@ def normalize_l2(embedding: list[float]) -> NDArray:
     return np.where(norm == 0, embedding_array, embedding_array / norm)
 
 
+def normalized_semaphore_limit(value: int | None) -> int | None:
+    """Return value only for a strict positive int (excludes bool). Otherwise None."""
+    if type(value) is int and value > 0:
+        return value
+    return None
+
+
 # Use this instead of asyncio.gather() to bound coroutines
 async def semaphore_gather(
     *coroutines: Coroutine,
     max_coroutines: int | None = None,
 ) -> list[Any]:
-    semaphore = asyncio.Semaphore(max_coroutines or SEMAPHORE_LIMIT)
+    limit = normalized_semaphore_limit(max_coroutines)
+    semaphore = asyncio.Semaphore(limit or SEMAPHORE_LIMIT)
 
     async def _wrap_coroutine(coroutine):
         async with semaphore:

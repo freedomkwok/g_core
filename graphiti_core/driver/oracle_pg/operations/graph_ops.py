@@ -8,6 +8,10 @@ from collections import defaultdict
 from typing import Any
 
 from graphiti_core.driver.operations.graph_ops import GraphMaintenanceOperations
+from graphiti_core.driver.oracle_pg.graph_queries import (
+    get_range_indices as get_oracle_pg_range_indices,
+    get_vector_indices as get_oracle_pg_vector_indices,
+)
 from graphiti_core.driver.oracle_pg.sql_utils import (
     get_graph_id_for_executor,
     get_property_graph_create_block,
@@ -89,32 +93,12 @@ class OraclePGGraphMaintenanceOperations(GraphMaintenanceOperations):
             await run_query(executor, block)
         await run_query(executor, get_property_graph_create_block(graph_id))
 
-        table_defs = {
-            'entity_nodes': ['group_id', 'name'],
-            'episodic_nodes': ['group_id', 'valid_at'],
-            'community_nodes': ['group_id', 'name'],
-            'saga_nodes': ['group_id', 'name'],
-            'entity_edges': ['group_id', 'src_uuid', 'dst_uuid'],
-            'episodic_edges': ['group_id', 'source_node_uuid', 'target_node_uuid'],
-            'community_edges': ['group_id', 'source_node_uuid', 'target_node_uuid'],
-            'has_episode_edges': ['group_id', 'source_node_uuid', 'target_node_uuid'],
-            'next_episode_edges': ['group_id', 'source_node_uuid', 'target_node_uuid'],
-        }
-        for base, columns in table_defs.items():
-            table_name = get_table_name(executor, base)
-            for column in columns:
-                index_name = f'{graph_id}_{base}_{column}_IDX'.upper()[:120]
-                block = f"""
-                BEGIN
-                  EXECUTE IMMEDIATE 'CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({column.upper()})';
-                EXCEPTION
-                  WHEN OTHERS THEN
-                    IF SQLCODE != -955 THEN
-                      RAISE;
-                    END IF;
-                END;
-                """
-                await run_query(executor, block)
+        for query in get_oracle_pg_range_indices(graph_id):
+            await run_query(executor, query)
+
+        vector_params = getattr(executor, 'vector_index_params', None)
+        for query in get_oracle_pg_vector_indices(graph_id, vector_params):
+            await run_query(executor, query)
 
     async def delete_all_indexes(
         self,
@@ -127,8 +111,12 @@ class OraclePGGraphMaintenanceOperations(GraphMaintenanceOperations):
             SELECT index_name
             FROM user_indexes
             WHERE index_name LIKE $index_like
+               OR index_name LIKE $context_index_like
+               OR index_name LIKE $vector_index_like
             """,
             index_like=f'{graph_id}\\_%\\_IDX',
+            context_index_like=f'{graph_id}\\_%\\_CTX',
+            vector_index_like=f'{graph_id}\\_%\\_VIVF\\_IDX',
         )
         for record in records:
             await run_query(executor, f'DROP INDEX {record["index_name"]}')

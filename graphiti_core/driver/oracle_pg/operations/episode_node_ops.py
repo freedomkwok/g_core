@@ -4,14 +4,12 @@ Oracle PG implementation for episodic node operations.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Any
 
 from graphiti_core.driver.operations.episode_node_ops import EpisodeNodeOperations
 from graphiti_core.driver.oracle_pg.sql_utils import (
     get_table_name,
-    parse_float_list,
     parse_json_list,
     run_query,
     sql_in_list,
@@ -27,7 +25,6 @@ from graphiti_core.nodes import EpisodeType, EpisodicNode
 def _normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(record)
     normalized['entity_edges'] = [str(value) for value in parse_json_list(normalized.get('entity_edges'))]
-    normalized['content_embedding'] = parse_float_list(normalized.get('content_embedding'))
     return normalized
 
 
@@ -51,8 +48,7 @@ class OraclePGEpisodeNodeOperations(EpisodeNodeOperations):
             $content AS content,
             $entity_edges AS entity_edges,
             $created_at AS created_at,
-            $valid_at AS valid_at,
-            CASE WHEN $content_embedding_vector IS NULL THEN NULL ELSE TO_VECTOR($content_embedding_vector) END AS content_embedding
+            $valid_at AS valid_at
           FROM dual
         ) s
         ON (t.uuid = s.uuid)
@@ -64,14 +60,12 @@ class OraclePGEpisodeNodeOperations(EpisodeNodeOperations):
           t.content = s.content,
           t.entity_edges = s.entity_edges,
           t.created_at = s.created_at,
-          t.valid_at = s.valid_at,
-          t.content_embedding = s.content_embedding
+          t.valid_at = s.valid_at
         WHEN NOT MATCHED THEN INSERT (
-          uuid, group_id, name, source, source_description, content, entity_edges, created_at, valid_at, content_embedding
+          uuid, group_id, name, source, source_description, content, entity_edges, created_at, valid_at
         )
         VALUES (
-          s.uuid, s.group_id, s.name, s.source, s.source_description, s.content, s.entity_edges,
-          s.created_at, s.valid_at, s.content_embedding
+          s.uuid, s.group_id, s.name, s.source, s.source_description, s.content, s.entity_edges, s.created_at, s.valid_at
         )
         """
         await run_query(
@@ -87,9 +81,6 @@ class OraclePGEpisodeNodeOperations(EpisodeNodeOperations):
             entity_edges=to_json_text(node.entity_edges, default=[]),
             created_at=node.created_at,
             valid_at=node.valid_at,
-            content_embedding_vector=(
-                json.dumps(node.content_embedding) if node.content_embedding is not None else None
-            ),
         )
 
     async def save_bulk(

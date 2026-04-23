@@ -30,6 +30,10 @@ from graphiti_core.driver.oracle.operations.entity_node_ops import OracleEntityN
 from graphiti_core.driver.oracle.operations.episode_node_ops import OracleEpisodeNodeOperations
 from graphiti_core.driver.oracle.operations.episodic_edge_ops import OracleEpisodicEdgeOperations
 from graphiti_core.driver.oracle.operations.graph_ops import OracleGraphMaintenanceOperations
+from graphiti_core.driver.oracle.maintenance.graph_data_operations import (
+    clear_data as clear_data_oracle_maintenance,
+    retrieve_episodes as retrieve_episodes_oracle_maintenance_stub,
+)
 from graphiti_core.driver.oracle.operations.has_episode_edge_ops import (
     OracleHasEpisodeEdgeOperations,
 )
@@ -40,6 +44,7 @@ from graphiti_core.driver.oracle.operations.saga_node_ops import OracleSagaNodeO
 from graphiti_core.driver.oracle.operations.search_ops import OracleSearchOperations
 from graphiti_core.driver.oracle_driver import OracleDriver, OracleDriverSession
 from graphiti_core.nodes import EpisodeType
+from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import (
     retrieve_episodes as retrieve_episodes_maintenance,
 )
@@ -674,6 +679,36 @@ def test_driver_exposes_operations_namespaces():
     assert isinstance(driver.next_episode_edge_ops, OracleNextEpisodeEdgeOperations)
     assert isinstance(driver.search_ops, OracleSearchOperations)
     assert isinstance(driver.graph_ops, OracleGraphMaintenanceOperations)
+    assert driver.graph_operations_interface is None
+
+
+@pytest.mark.asyncio
+async def test_oracle_maintenance_stubs_return_empty_values():
+    driver = OracleDriver(query_runner=AsyncMock())
+
+    assert await clear_data_oracle_maintenance(driver, group_ids=['group-1']) is None
+    retrieve_mock = AsyncMock(return_value=['newest', 'older'])
+    driver.episode_node_ops.retrieve_episodes = retrieve_mock  # type: ignore[method-assign]
+    reference_time = datetime.now()
+
+    episodes = await retrieve_episodes_oracle_maintenance_stub(
+        driver=driver,
+        reference_time=reference_time,
+        last_n=2,
+        group_ids=['group-1'],
+        source=EpisodeType.message,
+        saga='saga-1',
+    )
+
+    retrieve_mock.assert_awaited_once_with(
+        driver,
+        reference_time,
+        2,
+        ['group-1'],
+        EpisodeType.message.name,
+        'saga-1',
+    )
+    assert episodes == ['older', 'newest']
 
 
 @pytest.mark.asyncio
@@ -981,6 +1016,23 @@ async def test_oracle_episode_mentions_reranker_uses_sem_match_in_rdf_mode():
         called_query = await_args.args[0]
         assert 'SEM_MATCH' in called_query
         assert 'MATCH (episode:Episodic)-[r:MENTIONS]->(n:Entity' not in called_query
+
+
+@pytest.mark.asyncio
+async def test_oracle_search_interface_delegates_episode_fulltext_search():
+    query_runner = AsyncMock(return_value=[])
+    driver = OracleDriver(query_runner=query_runner)
+    delegated_search = AsyncMock(return_value=[])
+    driver.search_ops.episode_fulltext_search = delegated_search  # type: ignore[method-assign]
+
+    assert driver.search_interface is not None
+    search_filter = SearchFilters()
+    await driver.search_interface.episode_fulltext_search(
+        driver, 'incident report', search_filter, ['group-1'], 4
+    )
+
+    delegated_args = delegated_search.await_args.args
+    assert delegated_args == (driver, 'incident report', search_filter, ['group-1'], 4)
 
 
 @pytest.mark.integration

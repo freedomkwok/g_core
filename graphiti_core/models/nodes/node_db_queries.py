@@ -135,15 +135,15 @@ EPISODIC_NODE_RETURN_NEPTUNE = """
 """
 
 
-def get_episodic_node_return_query(provider: GraphProvider) -> str:
-    if provider == GraphProvider.NEPTUNE:
-        return EPISODIC_NODE_RETURN_NEPTUNE
-    return EPISODIC_NODE_RETURN
-
-
 def get_entity_node_save_query(provider: GraphProvider, labels: str, has_aoss: bool = False) -> str:
     validated_labels = _validate_entity_labels(labels)
     labels = ':'.join(validated_labels)
+    oracle_pg_provider = getattr(GraphProvider, 'ORACLE_PG', None)
+    if oracle_pg_provider is not None and provider == oracle_pg_provider:
+        raise NotImplementedError(
+            'GraphProvider.ORACLE_PG must use OraclePGDriver entity_node_ops.save(), '
+            'not Cypher/RDF query builders.'
+        )
 
     match provider:
         case GraphProvider.FALKORDB:
@@ -210,6 +210,12 @@ def get_entity_node_save_bulk_query(
 ) -> str | Any:
     for node in nodes:
         _validate_entity_labels(node.get('labels', []))
+    oracle_pg_provider = getattr(GraphProvider, 'ORACLE_PG', None)
+    if oracle_pg_provider is not None and provider == oracle_pg_provider:
+        raise NotImplementedError(
+            'GraphProvider.ORACLE_PG must use OraclePGDriver entity_node_ops.save_bulk(), '
+            'not Cypher/RDF query builders.'
+        )
 
     match provider:
         case GraphProvider.FALKORDB:
@@ -356,6 +362,12 @@ def get_community_node_save_query(provider: GraphProvider) -> str:
                 SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at, name_embedding: $name_embedding}
                 RETURN n.uuid AS uuid
             """
+        case GraphProvider.ORACLE_PG:
+            return """
+                MERGE (n:Community {uuid: $uuid})
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, summary: $summary, created_at: $created_at, name_embedding: $name_embedding}
+                RETURN n.uuid AS uuid
+            """
         case GraphProvider.NEPTUNE:
             return """
                 MERGE (n:Community {uuid: $uuid})
@@ -402,12 +414,6 @@ COMMUNITY_NODE_RETURN_NEPTUNE = """
 """
 
 
-def get_community_node_return_query(provider: GraphProvider) -> str:
-    if provider == GraphProvider.NEPTUNE:
-        return COMMUNITY_NODE_RETURN_NEPTUNE
-    return COMMUNITY_NODE_RETURN
-
-
 def get_saga_node_save_query(provider: GraphProvider) -> str:
     match provider:
         case GraphProvider.KUZU:
@@ -416,13 +422,17 @@ def get_saga_node_save_query(provider: GraphProvider) -> str:
                 SET
                     n.name = $name,
                     n.group_id = $group_id,
-                    n.created_at = $created_at
+                    n.created_at = $created_at,
+                    n.summary = $summary,
+                    n.first_episode_uuid = $first_episode_uuid,
+                    n.last_episode_uuid = $last_episode_uuid,
+                    n.last_summarized_at = $last_summarized_at
                 RETURN n.uuid AS uuid
             """
         case _:  # Neo4j, FalkorDB, Neptune
             return """
                 MERGE (n:Saga {uuid: $uuid})
-                SET n = {uuid: $uuid, name: $name, group_id: $group_id, created_at: $created_at}
+                SET n = {uuid: $uuid, name: $name, group_id: $group_id, created_at: $created_at, summary: $summary, first_episode_uuid: $first_episode_uuid, last_episode_uuid: $last_episode_uuid, last_summarized_at: $last_summarized_at}
                 RETURN n.uuid AS uuid
             """
 
@@ -431,18 +441,20 @@ SAGA_NODE_RETURN = """
     s.uuid AS uuid,
     s.name AS name,
     s.group_id AS group_id,
-    s.created_at AS created_at
+    s.created_at AS created_at,
+    s.summary AS summary,
+    s.first_episode_uuid AS first_episode_uuid,
+    s.last_episode_uuid AS last_episode_uuid,
+    s.last_summarized_at AS last_summarized_at
 """
 
 SAGA_NODE_RETURN_NEPTUNE = """
     s.uuid AS uuid,
     s.name AS name,
     s.group_id AS group_id,
-    s.created_at AS created_at
+    s.created_at AS created_at,
+    s.summary AS summary,
+    s.first_episode_uuid AS first_episode_uuid,
+    s.last_episode_uuid AS last_episode_uuid,
+    s.last_summarized_at AS last_summarized_at
 """
-
-
-def get_saga_node_return_query(provider: GraphProvider) -> str:
-    if provider == GraphProvider.NEPTUNE:
-        return SAGA_NODE_RETURN_NEPTUNE
-    return SAGA_NODE_RETURN
