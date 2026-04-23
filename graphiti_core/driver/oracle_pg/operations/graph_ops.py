@@ -9,6 +9,7 @@ from typing import Any
 
 from graphiti_core.driver.operations.graph_ops import GraphMaintenanceOperations
 from graphiti_core.driver.oracle_pg.graph_queries import (
+    get_fulltext_indices as get_oracle_pg_fulltext_indices,
     get_range_indices as get_oracle_pg_range_indices,
     get_vector_indices as get_oracle_pg_vector_indices,
 )
@@ -94,6 +95,9 @@ class OraclePGGraphMaintenanceOperations(GraphMaintenanceOperations):
         await run_query(executor, get_property_graph_create_block(graph_id))
 
         for query in get_oracle_pg_range_indices(graph_id):
+            await run_query(executor, query)
+
+        for query in get_oracle_pg_fulltext_indices(graph_id):
             await run_query(executor, query)
 
         vector_params = getattr(executor, 'vector_index_params', None)

@@ -48,7 +48,6 @@ from graphiti_core.driver.oracle_pg.operations import (
     OraclePGSagaNodeOperations,
     OraclePGSearchOperations,
 )
-from graphiti_core.driver.oracle_pg.graph_queries import get_fulltext_indices
 from graphiti_core.driver.oracle_pg.vector_index_params import OraclePGVectorIndexParams
 from graphiti_core.driver.oracle_pg.graph_operations_adapter import OraclePGGraphOperationsAdapter
 from graphiti_core.driver.oracle_pg.sql_utils import (
@@ -576,8 +575,6 @@ class OraclePGDriver(GraphDriver):
             delete_existing=delete_existing,
             drop_tables=drop_tables,
         )
-        for query in get_fulltext_indices(self._graph_id):
-            await self.execute_query(query)
         if self._query_runner is None:
             self._pg_tables_initialized = True
 
