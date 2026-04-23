@@ -201,6 +201,20 @@ def test_oracle_pg_driver_sets_fetch_job_default_false(monkeypatch: pytest.Monke
     assert defaults.fetch_job is False
 
 
+def test_oracle_pg_driver_sanitizes_query_vec_json_string():
+    redacted = oracle_pg_driver_module._sanitize_params_for_logging(  # noqa: SLF001
+        {
+            'query_vec': '[0.1, 0.2, 0.3]',
+            'min_score': 0.7,
+        }
+    )
+
+    assert redacted == {
+        'query_vec': '<redacted float_list len=3>',
+        'min_score': 0.7,
+    }
+
+
 @pytest.mark.asyncio
 async def test_oracle_pg_driver_build_indices_and_constraints_executes_pg_ddl():
     query_calls: list[tuple[str, dict[str, Any]]] = []

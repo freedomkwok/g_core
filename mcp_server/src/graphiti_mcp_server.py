@@ -278,8 +278,8 @@ class GraphitiService:
                 # Re-raise other errors
                 raise
 
-            # Build indices
-            await self.client.build_indices_and_constraints()
+            # Index bootstrap is application-controlled.
+            # await self.client.build_indices_and_constraints()
 
             logger.info('Successfully initialized Graphiti client')
 

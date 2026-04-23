@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
 from collections.abc import Awaitable, Callable, Coroutine
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
 
@@ -148,10 +150,33 @@ def _is_float_list(value: Any) -> bool:
     )
 
 
+def _is_numeric_list(value: Any) -> bool:
+    return isinstance(value, list) and len(value) > 0 and all(
+        isinstance(item, int | float) for item in value
+    )
+
+
+def _redact_vector_json_string(value: str) -> str | None:
+    stripped = value.strip()
+    if not (stripped.startswith('[') and stripped.endswith(']')):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if _is_numeric_list(parsed):
+        return f'<redacted float_list len={len(parsed)}>'
+    return None
+
+
 def _sanitize_params_for_logging(value: Any) -> Any:
     """Recursively redact embedding-like parameters from logs."""
     if _is_float_list(value):
         return f'<redacted float_list len={len(value)}>'
+    if isinstance(value, str):
+        redacted = _redact_vector_json_string(value)
+        if redacted is not None:
+            return redacted
     if isinstance(value, dict):
         return {key: _sanitize_params_for_logging(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -159,6 +184,15 @@ def _sanitize_params_for_logging(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_sanitize_params_for_logging(item) for item in value)
     return value
+
+
+def _pool_stats_for_logging(pool: Any) -> dict[str, Any]:
+    stats: dict[str, Any] = {}
+    for key in ('min', 'max', 'increment', 'opened', 'busy'):
+        value = getattr(pool, key, None)
+        if value is not None:
+            stats[key] = value
+    return stats
 
 
 class OraclePGDriverSession(GraphDriverSession):
@@ -372,6 +406,16 @@ class OraclePGDriver(GraphDriver):
             _sanitize_params_for_logging(params),
         )
 
+    def _log_query_elapsed_if_enabled(self, mode: str, elapsed_ms: float, status: str) -> None:
+        if not self._log_queries:
+            return
+        logger.info(
+            'Oracle query mode=%s status=%s elapsed_ms=%.1f',
+            mode,
+            status,
+            elapsed_ms,
+        )
+
     async def _execute_with_query_runner(
         self, query: str, params: dict[str, Any]
     ) -> tuple[list[dict[str, Any]], Any, Any]:
@@ -379,12 +423,21 @@ class OraclePGDriver(GraphDriver):
         if query_runner is None:
             raise ValueError('Oracle query_runner is not configured.')
 
+        start = perf_counter()
         try:
             self._log_query_if_enabled(query, params, 'query_runner')
             result = await query_runner(query, params)
+            self._log_query_elapsed_if_enabled(
+                'query_runner', (perf_counter() - start) * 1000, 'ok'
+            )
         except Exception as exc:
             sanitized_params = _sanitize_params_for_logging(params)
-            logger.error(f'Error executing Oracle query: {exc}\n{query}\n{sanitized_params}')
+            elapsed_ms = (perf_counter() - start) * 1000
+            self._log_query_elapsed_if_enabled('query_runner', elapsed_ms, 'error')
+            logger.error(
+                f'Error executing Oracle query in {elapsed_ms:.1f} ms: '
+                f'{exc}\n{query}\n{sanitized_params}'
+            )
             raise
 
         if isinstance(result, tuple):
@@ -427,6 +480,11 @@ class OraclePGDriver(GraphDriver):
                     if inspect.isawaitable(pool):
                         pool = await pool
                     self.pool = pool
+                    logger.info(
+                        'OraclePGDriver pool initialized dsn=%s stats=%s',
+                        self._dsn,
+                        _pool_stats_for_logging(pool),
+                    )
 
         return self.pool
 
@@ -471,14 +529,22 @@ class OraclePGDriver(GraphDriver):
         oracle_query, oracle_params = self._prepare_oracle_query(query, params)
         self._log_query_if_enabled(oracle_query, oracle_params, 'native')
 
+        start = perf_counter()
         try:
             async with pool.acquire() as connection:
                 connection.autocommit = True
                 await self._ensure_pg_tables_on_connection(connection)
-                return await self._run_query_async(connection, oracle_query, oracle_params)
+                result = await self._run_query_async(connection, oracle_query, oracle_params)
+                self._log_query_elapsed_if_enabled('native', (perf_counter() - start) * 1000, 'ok')
+                return result
         except Exception as exc:
             sanitized_params = _sanitize_params_for_logging(oracle_params)
-            logger.error(f'Error executing Oracle PG query: {exc}\n{oracle_query}\n{sanitized_params}')
+            elapsed_ms = (perf_counter() - start) * 1000
+            self._log_query_elapsed_if_enabled('native', elapsed_ms, 'error')
+            logger.error(
+                f'Error executing Oracle PG query in {elapsed_ms:.1f} ms: '
+                f'{exc}\n{oracle_query}\n{sanitized_params}'
+            )
             raise
 
     def session(self, database: str | None = None) -> GraphDriverSession:

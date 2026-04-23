@@ -96,7 +96,8 @@ async def initialize_graphiti(settings: ZepEnvDep):
         user=settings.neo4j_user,
         password=settings.neo4j_password,
     )
-    await client.build_indices_and_constraints()
+    # Index bootstrap is application-controlled.
+    # await client.build_indices_and_constraints()
 
 
 def get_fact_result_from_edge(edge: EntityEdge):
