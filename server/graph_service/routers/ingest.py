@@ -107,6 +107,5 @@ async def clear(
     graphiti: ZepGraphitiDep,
 ):
     await clear_data(graphiti.driver)
-    # Index bootstrap is application-controlled.
-    # await graphiti.build_indices_and_constraints()
+    await graphiti.build_indices_and_constraints()
     return Result(message='Graph cleared', success=True)
