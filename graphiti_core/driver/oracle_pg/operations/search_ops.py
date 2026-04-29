@@ -9,6 +9,8 @@ from typing import Any
 
 from graphiti_core.driver.operations.search_ops import SearchOperations
 from graphiti_core.driver.oracle_pg.sql_utils import (
+    get_graph_id_for_executor,
+    get_property_graph_name,
     get_table_name,
     parse_json_dict,
     parse_json_list,
@@ -160,45 +162,80 @@ class OraclePGSearchOperations(SearchOperations):
         group_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[EntityNode]:
-        if not origin_uuids:
+        if not origin_uuids or max_depth < 1:
             return []
-        edge_table = get_table_name(executor, 'entity_edges')
-        visited = set(origin_uuids)
-        frontier = set(origin_uuids)
-        for _ in range(max_depth):
-            if not frontier:
-                break
-            rows = await run_query(
-                executor,
-                f"""
-                SELECT src_uuid, dst_uuid
-                FROM {edge_table}
-                WHERE src_uuid IN {sql_in_list(list(frontier))}
-                   OR dst_uuid IN {sql_in_list(list(frontier))}
-                """,
-            )
-            next_frontier: set[str] = set()
-            for row in rows:
-                src = row['src_uuid']
-                dst = row['dst_uuid']
-                if src not in visited:
-                    next_frontier.add(src)
-                if dst not in visited:
-                    next_frontier.add(dst)
-            visited.update(next_frontier)
-            frontier = next_frontier
-
+        # edge_table = get_table_name(executor, 'entity_edges')
+        # visited = set(origin_uuids)
+        # frontier = set(origin_uuids)
+        # for _ in range(max_depth):
+        #     if not frontier:
+        #         break
+        #     rows = await run_query(
+        #         executor,
+        #         f"""
+        #         SELECT src_uuid, dst_uuid
+        #         FROM {edge_table}
+        #         WHERE src_uuid IN {sql_in_list(list(frontier))}
+        #            OR dst_uuid IN {sql_in_list(list(frontier))}
+        #         """,
+        #     )
+        #     next_frontier: set[str] = set()
+        #     for row in rows:
+        #         src = row['src_uuid']
+        #         dst = row['dst_uuid']
+        #         if src not in visited:
+        #             next_frontier.add(src)
+        #         if dst not in visited:
+        #             next_frontier.add(dst)
+        #     visited.update(next_frontier)
+        #     frontier = next_frontier
+        #
+        # table = get_table_name(executor, 'entity_nodes')
+        # group_clause = f' AND group_id IN {sql_in_list(group_ids)}' if group_ids else ''
+        # label_clause = _node_label_sql(search_filter)
+        # records = await run_query(
+        #     executor,
+        #     f"""
+        #     SELECT uuid, name, group_id, created_at, summary, labels, attributes
+        #     FROM {table}
+        #     WHERE uuid IN {sql_in_list(list(visited))}
+        #     {group_clause}
+        #     {label_clause}
+        #     FETCH FIRST {int(limit)} ROWS ONLY
+        #     """,
+        # )
+        # return [entity_node_from_record(_normalize_entity_node(record)) for record in records]
         table = get_table_name(executor, 'entity_nodes')
-        group_clause = f' AND group_id IN {sql_in_list(group_ids)}' if group_ids else ''
-        label_clause = _node_label_sql(search_filter)
+        graph_name = get_property_graph_name(get_graph_id_for_executor(executor))
+        where_parts = []
+        if group_ids:
+            where_parts.append(f'entity_node.group_id IN {sql_in_list(group_ids)}')
+        origin_group_clause = f' AND origin.group_id IN {sql_in_list(group_ids)}' if group_ids else ''
+        label_clause = _node_label_sql(search_filter, 'entity_node.labels').removeprefix(' AND ')
+        if label_clause:
+            where_parts.append(label_clause)
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ''
         records = await run_query(
             executor,
             f"""
-            SELECT uuid, name, group_id, created_at, summary, labels, attributes
-            FROM {table}
-            WHERE uuid IN {sql_in_list(list(visited))}
-            {group_clause}
-            {label_clause}
+            SELECT DISTINCT
+              entity_node.uuid,
+              entity_node.name,
+              entity_node.group_id,
+              entity_node.created_at,
+              entity_node.summary,
+              entity_node.labels,
+              entity_node.attributes
+            FROM GRAPH_TABLE (
+              {graph_name}
+              MATCH (origin IS Entity) -[IS RELATES_TO|MENTIONS]->{{1, {int(max_depth)}}} (target IS Entity)
+              WHERE origin.uuid IN {sql_in_list(origin_uuids)}
+                AND target.group_id = origin.group_id
+                {origin_group_clause}
+              COLUMNS (target.uuid AS node_uuid)
+            ) path_nodes
+            JOIN {table} entity_node ON entity_node.uuid = path_nodes.node_uuid
+            {where_clause}
             FETCH FIRST {int(limit)} ROWS ONLY
             """,
         )
@@ -313,38 +350,83 @@ class OraclePGSearchOperations(SearchOperations):
         if not origin_uuids:
             return []
         table = get_table_name(executor, 'entity_edges')
-        visited_nodes = set(origin_uuids)
-        frontier = set(origin_uuids)
-        edge_ids: set[str] = set()
-        for _ in range(max_depth):
-            if not frontier:
-                break
-            records = await run_query(
-                executor,
-                f"""
-                SELECT uuid, src_uuid, dst_uuid, group_id
-                FROM {table}
-                WHERE src_uuid IN {sql_in_list(list(frontier))}
-                   OR dst_uuid IN {sql_in_list(list(frontier))}
-                """,
-            )
-            next_frontier: set[str] = set()
-            for record in records:
-                if group_ids and record.get('group_id') not in group_ids:
-                    continue
-                edge_ids.add(record['uuid'])
-                src = record['src_uuid']
-                dst = record['dst_uuid']
-                if src not in visited_nodes:
-                    next_frontier.add(src)
-                if dst not in visited_nodes:
-                    next_frontier.add(dst)
-            visited_nodes.update(next_frontier)
-            frontier = next_frontier
-        if not edge_ids:
+        graph_name = get_property_graph_name(get_graph_id_for_executor(executor))
+        depth = max(0, int(max_depth))
+        if depth == 0:
             return []
-        edges = await self.get_edges_by_ids(executor, list(edge_ids), limit, search_filter)
-        return edges
+        # visited_nodes = set(origin_uuids)
+        # frontier = set(origin_uuids)
+        # edge_ids: set[str] = set()
+        # for _ in range(max_depth):
+        #     if not frontier:
+        #         break
+        #     records = await run_query(
+        #         executor,
+        #         f"""
+        #         SELECT uuid, src_uuid, dst_uuid, group_id
+        #         FROM {table}
+        #         WHERE src_uuid IN {sql_in_list(list(frontier))}
+        #            OR dst_uuid IN {sql_in_list(list(frontier))}
+        #         """,
+        #     )
+        #     next_frontier: set[str] = set()
+        #     for record in records:
+        #         if group_ids and record.get('group_id') not in group_ids:
+        #             continue
+        #         edge_ids.add(record['uuid'])
+        #         src = record['src_uuid']
+        #         dst = record['dst_uuid']
+        #         if src not in visited_nodes:
+        #             next_frontier.add(src)
+        #         if dst not in visited_nodes:
+        #             next_frontier.add(dst)
+        #     visited_nodes.update(next_frontier)
+        #     frontier = next_frontier
+        # if not edge_ids:
+        #     return []
+        # edges = await self.get_edges_by_ids(executor, list(edge_ids), limit, search_filter)
+        # return edges
+        path_edge_group_clause = (
+            f' WHERE path_edge.group_id IN {sql_in_list(group_ids)}' if group_ids else ''
+        )
+        where_parts = ['1 = 1']
+        if group_ids:
+            where_parts.append(f'entity_edge.group_id IN {sql_in_list(group_ids)}')
+        if search_filter.edge_uuids:
+            where_parts.append(f'entity_edge.uuid IN {sql_in_list(search_filter.edge_uuids)}')
+        if search_filter.edge_types:
+            where_parts.append(f'entity_edge.name IN {sql_in_list(search_filter.edge_types)}')
+        where_clause = ' AND '.join(where_parts)
+
+        records = await run_query(
+            executor,
+            f"""
+            SELECT DISTINCT
+              entity_edge.uuid,
+              entity_edge.src_uuid AS source_node_uuid,
+              entity_edge.dst_uuid AS target_node_uuid,
+              entity_edge.group_id,
+              entity_edge.created_at,
+              entity_edge.name,
+              entity_edge.fact_text AS fact,
+              entity_edge.episodes,
+              entity_edge.valid_at,
+              entity_edge.invalid_at,
+              entity_edge.expired_at,
+              entity_edge.attributes
+            FROM GRAPH_TABLE (
+              {graph_name}
+              MATCH (origin) -[path_edge IS RELATES_TO|MENTIONS{path_edge_group_clause}]->{{1, {depth}}} (target IS Entity)
+              WHERE origin.uuid IN {sql_in_list(origin_uuids)}
+              ONE ROW PER STEP (step_src, step_edge, step_dst)
+              COLUMNS (step_edge.uuid AS edge_uuid)
+            ) path_edges
+            JOIN {table} entity_edge ON entity_edge.uuid = path_edges.edge_uuid
+            WHERE {where_clause}
+            FETCH FIRST {int(limit)} ROWS ONLY
+            """,
+        )
+        return [entity_edge_from_record(_normalize_entity_edge(record)) for record in records]
 
     async def episode_fulltext_search(
         self,
