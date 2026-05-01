@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import inspect
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ if TYPE_CHECKING:
     from graphiti_core.nodes import EpisodeType
 
 RunAsync = Callable[[Coroutine[Any, Any, Any]], Any]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -203,6 +206,7 @@ class GraphitiOraclePGClient:
         run_async: RunAsync | None = None,
         ontology: GraphitiOntologyRegistry | None = None,
     ) -> GraphitiOraclePGClient:
+        logger.info('GraphitiOraclePGClient.from_connection graph_id=%r', graph_id)
         connection = GraphitiOraclePGConnection(
             dsn=dsn,
             user=user,
@@ -240,6 +244,7 @@ class GraphitiOraclePGClient:
         run_async: RunAsync | None = None,
         ontology: GraphitiOntologyRegistry | None = None,
     ) -> GraphitiOraclePGClient:
+        logger.info('GraphitiOraclePGClient.from_config graph_id=%r', connection.graph_id)
         driver_kwargs: dict[str, Any] = {
             'dsn': connection.dsn,
             'user': connection.user,
